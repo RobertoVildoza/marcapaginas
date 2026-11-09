@@ -1,5 +1,6 @@
 """Cliente del modelo Gemini (SDK google-genai, versión asíncrona)."""
 
+import asyncio
 import logging
 
 from google.genai import types
@@ -69,6 +70,11 @@ REGLAS OBLIGATORIAS (no son sugerencias, se cumplen siempre):
 
 logger = logging.getLogger("marcapaginas.gemini")
 
+# Tope de espera por llamada al modelo. Con un 503 el SDK reintenta por dentro y el usuario
+# esperaba más de 60 segundos; 30 da margen para una llamada con dos idas y vueltas de
+# herramientas, que es lo más lento que vimos funcionando bien.
+SEGUNDOS_MAXIMOS_DEL_MODELO = 30
+
 # Gemini llama "user" y "model" a los roles; en nuestra base son "usuario" y "bot".
 ROL_PARA_GEMINI = {"usuario": "user", "bot": "model"}
 
@@ -111,11 +117,19 @@ async def responder(chat_id: int, texto_usuario: str) -> str:
                 tools=herramientas.construir_herramientas(chat_id),
             ),
         )
-        respuesta = await chat.send_message(texto_usuario)
+        respuesta = await asyncio.wait_for(
+            chat.send_message(texto_usuario), timeout=SEGUNDOS_MAXIMOS_DEL_MODELO
+        )
 
         if not respuesta.text:
             raise ValueError("El modelo devolvió una respuesta vacía")
         return respuesta.text
+    except asyncio.TimeoutError as error:
+        logger.error(
+            "Gemini no respondió en %d segundos (chat %s): se corta por tiempo",
+            SEGUNDOS_MAXIMOS_DEL_MODELO, chat_id,
+        )
+        raise ErrorDelModelo("El modelo tardó demasiado en responder") from error
     except Exception as error:
         logger.error("Falló la llamada a Gemini (chat %s)", chat_id, exc_info=True)
         raise ErrorDelModelo(str(error)) from error
@@ -152,14 +166,23 @@ async def recomendar_con_preferencias(
         f"Libros disponibles:\n{renglones}"
     )
     try:
-        respuesta = await cliente.aio.models.generate_content(
-            model=GEMINI_MODELO,
-            contents=pedido,
-            config=types.GenerateContentConfig(system_instruction=PROMPT_DE_RECOMENDACION),
+        respuesta = await asyncio.wait_for(
+            cliente.aio.models.generate_content(
+                model=GEMINI_MODELO,
+                contents=pedido,
+                config=types.GenerateContentConfig(system_instruction=PROMPT_DE_RECOMENDACION),
+            ),
+            timeout=SEGUNDOS_MAXIMOS_DEL_MODELO,
         )
         if not respuesta.text:
             raise ValueError("El modelo devolvió una respuesta vacía")
         return respuesta.text
+    except asyncio.TimeoutError as error:
+        logger.error(
+            "Gemini no respondió en %d segundos (recomendación): se corta por tiempo",
+            SEGUNDOS_MAXIMOS_DEL_MODELO,
+        )
+        raise ErrorDelModelo("El modelo tardó demasiado en responder") from error
     except Exception as error:
         logger.error("Falló la recomendación con preferencias", exc_info=True)
         raise ErrorDelModelo(str(error)) from error

@@ -189,6 +189,12 @@ async def conversar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Falló el guardado del historial (chat %s)", chat_id, exc_info=True)
 
 
+# Comandos que no existen
+async def comando_desconocido(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Avisa que no conocemos el comando en vez de quedarnos callados."""
+    await update.message.reply_text("Ese comando no lo conozco. Probá con /help o con el menú.")
+
+
 # Manejo de errores
 async def manejo_error(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Registra cualquier error para que el bot no se detenga."""
@@ -211,6 +217,10 @@ def main() -> None:
     app.add_handler(CommandHandler("cancelar", cancelar))
     app.add_handler(CommandHandler("olvidar", olvidar))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, conversar))
+    # Tiene que ir DESPUÉS de todos los CommandHandler: la Application entrega cada update
+    # al primer handler que lo acepta, y filters.COMMAND acepta cualquier comando, así que
+    # si estuviera antes se comería los comandos que sí existen.
+    app.add_handler(MessageHandler(filters.COMMAND, comando_desconocido))
     app.add_error_handler(manejo_error)
 
     logger.info("Marcapáginas está en línea. Ctrl+C para detenerlo.")
