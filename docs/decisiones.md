@@ -71,3 +71,26 @@ defecto. La explicación de por qué `/subjects` favorece esos clásicos (que pr
 edición digital libre) es una hipótesis nuestra: no la verificamos en la documentación de Open
 Library. Por diseño, la herramienta pide el tema en inglés porque los temas que probamos
 estaban en inglés.
+
+## 4. Las páginas de los libros salen de Open Library, en aproximado
+
+**Qué asumimos:** que Open Library no devolvía la cantidad de páginas. Lo declaramos como una
+limitación conocida y lo escribimos en el prompt ("no sabés la cantidad de páginas"), pero nunca
+lo habíamos medido: nuestras consultas simplemente no pedían ese campo.
+
+**Qué medimos:** el 09/11/2026 Claude consultó `search.json` pidiendo el campo
+`number_of_pages_median`, con 5 libros por tema en 5 temas (ciencia ficción, terror, misterio,
+romance e historia). Vino con valor en 24 de los 25 libros; solo "Married at first sight" vino
+sin dato. Ejemplos: Roadside Picnic 170, The Exorcist 400, The Shining 506. Es la mediana entre
+ediciones, no el dato de una edición concreta, y puede traer valores raros: un libro de historia
+en indonesio dio 94.
+
+**Qué cambió:**
+- `buscar_libro` y `recomendar_por_tema` devuelven `paginas` (null si no hay dato).
+- La regla 6 del prompt ahora permite mencionar las páginas solo si vienen en el resultado, siempre
+  en aproximado ("unas 170 páginas"), a propósito porque son una mediana. Si el campo viene vacío,
+  el bot dice que no tiene el dato y nunca lo estima.
+- El flujo guiado (`/queleo`) clasifica cada libro como corto (menos de 250 páginas), mediano
+  (de 250 a 450) o largo (más de 450) con esos datos reales, y se los pasa al modelo junto con
+  la extensión que pidió el usuario. Los umbrales son una elección nuestra, no una medición.
+  La clasificación la hace el código; el modelo elige entre los libros y explica por qué encajan.
