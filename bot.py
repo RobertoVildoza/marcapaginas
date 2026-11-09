@@ -13,6 +13,7 @@ from telegram.ext import (
 )
 
 import analisis
+import flujo
 import gemini
 import memoria
 from config import TELEGRAM_TOKEN
@@ -51,6 +52,8 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start - Presentación\n"
         "/help - Esta ayuda\n"
         "/lista - Tu lista de lectura\n"
+        "/queleo - Te hago tres preguntas y te recomiendo qué leer\n"
+        "/cancelar - Salgo de /queleo en cualquier momento\n"
         "/resena - Analizo una reseña: /resena seguido del texto\n"
         "/olvidar - Borro lo que recuerdo de nuestra conversación\n\n"
         "También podés escribirme cualquier mensaje y charlamos sobre libros."
@@ -103,6 +106,21 @@ async def resena(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+# Comando /queleo
+async def que_leo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Empieza el flujo guiado: a partir de acá los textos del chat van al flujo."""
+    await update.message.reply_text(flujo.iniciar(update.effective_chat.id))
+
+
+# Comando /cancelar
+async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sale del flujo guiado en cualquier momento y lo confirma."""
+    if flujo.cancelar(update.effective_chat.id):
+        await update.message.reply_text("Listo, cancelé la búsqueda. Cuando quieras, /queleo de nuevo.")
+    else:
+        await update.message.reply_text("No tenés ninguna búsqueda en curso.")
+
+
 # Comando /olvidar
 async def olvidar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Borra el historial de este chat y lo confirma."""
@@ -110,6 +128,24 @@ async def olvidar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     memoria.borrar_historial(chat_id)
     logger.info("Historial borrado en el chat %s", chat_id)
     await update.message.reply_text("Listo, olvidé nuestra conversación. Tu lista de lectura sigue intacta.")
+
+
+async def responder_con_el_flujo(update: Update, chat_id: int, texto: str) -> None:
+    """Le pasa el texto al flujo guiado y envía lo que conteste."""
+    try:
+        respuesta = await flujo.avanzar(chat_id, texto)
+    except gemini.ErrorDelModelo:
+        # El flujo queda en su último paso: el usuario puede reintentar escribiendo de nuevo.
+        await update.message.reply_text(MENSAJE_DE_ERROR)
+        return
+
+    await update.message.reply_text(respuesta.texto)
+
+    if respuesta.intercambio:  # el flujo terminó: la recomendación pasa a ser parte de la charla
+        try:
+            memoria.guardar_intercambio(chat_id, *respuesta.intercambio)
+        except Exception:
+            logger.error("Falló el guardado del historial (chat %s)", chat_id, exc_info=True)
 
 
 # Responder un texto con Gemini
@@ -121,6 +157,17 @@ async def conversar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # El modelo tarda unos segundos: mostramos "escribiendo..." para que no parezca colgado
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+    # Si hay un flujo guiado en curso, el mensaje es la respuesta a su pregunta y no pasa
+    # por la conversación general. Si el flujo venció, se descartó y seguimos con la charla.
+    estado_del_flujo = flujo.situacion(chat_id)
+    if estado_del_flujo == flujo.VENCIDO:
+        await update.message.reply_text(
+            "Tu búsqueda de /queleo quedó vieja y la descarté. Si querés, empezá otra con /queleo."
+        )
+    elif estado_del_flujo == flujo.ACTIVO:
+        await responder_con_el_flujo(update, chat_id, texto)
+        return
 
     # Primero respondemos (con el historial anterior) y recién después guardamos el par,
     # así el mensaje nuevo no queda duplicado en el pedido al modelo.
@@ -150,6 +197,9 @@ async def manejo_error(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 def main() -> None:
     memoria.inicializar()
+    descartados = memoria.borrar_flujos_vencidos(flujo.MINUTOS_DE_VIGENCIA)
+    if descartados:
+        logger.info("Flujos vencidos descartados al arrancar: %d", descartados)
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -157,6 +207,8 @@ def main() -> None:
     app.add_handler(CommandHandler("help", ayuda))
     app.add_handler(CommandHandler("lista", lista))
     app.add_handler(CommandHandler("resena", resena))
+    app.add_handler(CommandHandler("queleo", que_leo))
+    app.add_handler(CommandHandler("cancelar", cancelar))
     app.add_handler(CommandHandler("olvidar", olvidar))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, conversar))
     app.add_error_handler(manejo_error)

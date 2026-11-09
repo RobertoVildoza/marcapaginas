@@ -74,6 +74,8 @@ reiniciá el bot.
 | `/help` | Lista los comandos. |
 | `/lista` | Muestra tu lista de lectura. |
 | `/resena <texto>` | Analiza una reseña: sentimiento, aspectos elogiados y criticados, síntesis. |
+| `/queleo` | Te hace tres preguntas (género, extensión, ánimo) y te recomienda qué leer. Si lo dejás a medias, vence a los 30 minutos. |
+| `/cancelar` | Sale de `/queleo` en cualquier momento. |
 | `/olvidar` | Borra la conversación (la lista de lectura se conserva). |
 
 Cualquier otro mensaje se conversa con el bot: pedile recomendaciones por género, preguntale por

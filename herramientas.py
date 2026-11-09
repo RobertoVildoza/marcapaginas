@@ -51,8 +51,9 @@ async def buscar_libro(consulta: str) -> dict:
 
     Returns:
         Un diccionario con "estado" ("ok", "sin_resultados" o "error"). Si es "ok", trae
-        "libros": hasta tres libros, cada uno con "titulo", "autor" y "anio" (el año puede
-        ser null si no se conoce). Si es "sin_resultados" o "error", trae "mensaje" con lo
+        "libros": hasta tres libros, cada uno con "titulo", "autor", "anio" y "paginas"
+        (el año y las páginas pueden ser null si no se conocen; las páginas son aproximadas,
+        la mediana entre ediciones). Si es "sin_resultados" o "error", trae "mensaje" con lo
         que pasó, para que se lo expliques al usuario.
     """
     logger.info(
@@ -62,7 +63,7 @@ async def buscar_libro(consulta: str) -> dict:
     parametros = {
         "q": consulta,
         "limit": 3,
-        "fields": "title,author_name,first_publish_year",
+        "fields": "title,author_name,first_publish_year,number_of_pages_median",
     }
     try:
         async with httpx.AsyncClient(
@@ -83,12 +84,60 @@ async def buscar_libro(consulta: str) -> dict:
             "titulo": doc.get("title"),
             "autor": _elegir_autor(doc.get("author_name", [])),
             "anio": doc.get("first_publish_year"),
+            "paginas": doc.get("number_of_pages_median"),
         }
         for doc in datos.get("docs", [])
     ]
     if not libros:
         logger.info("buscar_libro: sin resultados para consulta=%r", consulta)
         return {"estado": "sin_resultados", "mensaje": "Open Library no encontró libros para esa búsqueda."}
+    return {"estado": "ok", "libros": libros}
+
+
+async def buscar_por_tema(tema: str, cantidad: int) -> dict:
+    """Busca hasta `cantidad` libros de un tema en Open Library.
+
+    La usan la herramienta recomendar_por_tema (que pide 5) y el flujo guiado (que pide más
+    para tener de dónde elegir). Devuelve el mismo diccionario que la herramienta.
+    """
+    tema_limpio = " ".join(tema.replace('"', " ").lower().split())
+    if not tema_limpio:
+        return {"estado": "sin_resultados", "mensaje": "No se indicó ningún tema."}
+    # Usamos search.json con subject: y no el endpoint /subjects. Medido en comparar_rutas.py:
+    # /subjects devolvía clásicos de dominio público (Alicia en el País de las Maravillas y
+    # Drácula como ciencia ficción) porque prioriza libros con edición digital libre;
+    # search.json con subject: devolvió Asimov, Strugatski y Simmons. Sin sort: ninguno mejoró.
+    parametros = {
+        "q": f'subject:"{tema_limpio}"',
+        "limit": cantidad,
+        "fields": "title,author_name,first_publish_year,number_of_pages_median",
+    }
+    try:
+        async with httpx.AsyncClient(
+            timeout=10, headers={"User-Agent": USER_AGENT}
+        ) as cliente_http:
+            respuesta = await cliente_http.get(URL_OPEN_LIBRARY, params=parametros)
+            respuesta.raise_for_status()
+            datos = respuesta.json()
+    except httpx.TimeoutException:
+        logger.error("buscar_por_tema: Open Library no respondió a tiempo (tema=%r)", tema)
+        return {"estado": "error", "mensaje": "Open Library tardó demasiado en responder."}
+    except (httpx.HTTPError, ValueError):
+        logger.error("buscar_por_tema: falló la consulta a Open Library (tema=%r)", tema, exc_info=True)
+        return {"estado": "error", "mensaje": "No se pudo consultar Open Library en este momento."}
+
+    libros = [
+        {
+            "titulo": doc.get("title"),
+            "autor": _elegir_autor(doc.get("author_name", [])),
+            "anio": doc.get("first_publish_year"),
+            "paginas": doc.get("number_of_pages_median"),
+        }
+        for doc in datos.get("docs", [])
+    ]
+    if not libros:
+        logger.info("buscar_por_tema: sin resultados para tema=%r", tema)
+        return {"estado": "sin_resultados", "mensaje": "Open Library no tiene libros para ese tema."}
     return {"estado": "ok", "libros": libros}
 
 
@@ -105,52 +154,16 @@ async def recomendar_por_tema(tema: str) -> dict:
 
     Returns:
         Un diccionario con "estado" ("ok", "sin_resultados" o "error"). Si es "ok", trae
-        "libros": hasta cinco libros, cada uno con "titulo", "autor" y "anio" (el año puede
-        ser null si no se conoce). Si es "sin_resultados" o "error", trae "mensaje" con lo
+        "libros": hasta cinco libros, cada uno con "titulo", "autor", "anio" y "paginas"
+        (el año y las páginas pueden ser null si no se conocen; las páginas son aproximadas,
+        la mediana entre ediciones). Si es "sin_resultados" o "error", trae "mensaje" con lo
         que pasó, para que se lo expliques al usuario.
     """
     logger.info(
         "Herramienta recomendar_por_tema invocada con tema=%r", tema,
         extra={"herramienta": "recomendar_por_tema"},
     )
-    tema_limpio = " ".join(tema.replace('"', " ").lower().split())
-    if not tema_limpio:
-        return {"estado": "sin_resultados", "mensaje": "No se indicó ningún tema."}
-    # Usamos search.json con subject: y no el endpoint /subjects. Medido en comparar_rutas.py:
-    # /subjects devolvía clásicos de dominio público (Alicia en el País de las Maravillas y
-    # Drácula como ciencia ficción) porque prioriza libros con edición digital libre;
-    # search.json con subject: devolvió Asimov, Strugatski y Simmons. Sin sort: ninguno mejoró.
-    parametros = {
-        "q": f'subject:"{tema_limpio}"',
-        "limit": 5,
-        "fields": "title,author_name,first_publish_year",
-    }
-    try:
-        async with httpx.AsyncClient(
-            timeout=10, headers={"User-Agent": USER_AGENT}
-        ) as cliente_http:
-            respuesta = await cliente_http.get(URL_OPEN_LIBRARY, params=parametros)
-            respuesta.raise_for_status()
-            datos = respuesta.json()
-    except httpx.TimeoutException:
-        logger.error("recomendar_por_tema: Open Library no respondió a tiempo (tema=%r)", tema)
-        return {"estado": "error", "mensaje": "Open Library tardó demasiado en responder."}
-    except (httpx.HTTPError, ValueError):
-        logger.error("recomendar_por_tema: falló la consulta a Open Library (tema=%r)", tema, exc_info=True)
-        return {"estado": "error", "mensaje": "No se pudo consultar Open Library en este momento."}
-
-    libros = [
-        {
-            "titulo": doc.get("title"),
-            "autor": _elegir_autor(doc.get("author_name", [])),
-            "anio": doc.get("first_publish_year"),
-        }
-        for doc in datos.get("docs", [])
-    ]
-    if not libros:
-        logger.info("recomendar_por_tema: sin resultados para tema=%r", tema)
-        return {"estado": "sin_resultados", "mensaje": "Open Library no tiene libros para ese tema."}
-    return {"estado": "ok", "libros": libros}
+    return await buscar_por_tema(tema, 5)
 
 
 async def analizar_resena(texto: str) -> dict:

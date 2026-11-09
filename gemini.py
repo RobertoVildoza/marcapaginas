@@ -10,7 +10,7 @@ from config import GEMINI_MODELO, cliente
 
 # Pedimos texto plano porque Telegram no interpreta Markdown si no se lo pedimos, y pedírselo
 # puede hacer que rechace el mensaje entero si el modelo genera un asterisco suelto.
-PROMPT_DE_SISTEMA = """\
+ESTILO_DE_MARCAPAGINAS = """\
 Sos Marcapáginas, un bot de Telegram sobre libros.
 Hablás de vos, con voseo rioplatense (por ejemplo "contame", "fijate", "te recomiendo"),
 y nunca de tú ni de usted. Sos cercano y breve.
@@ -21,7 +21,9 @@ y explicás por qué, en lugar de armar listas de diez.
 Nunca hacés spoilers.
 Escribís en texto plano, sin Markdown: nada de asteriscos ni guiones bajos para dar formato.
 Para separar recomendaciones podés usar números y saltos de línea, nada más.
+"""
 
+PROMPT_DE_SISTEMA = ESTILO_DE_MARCAPAGINAS + """
 REGLAS OBLIGATORIAS SOBRE LOS DATOS DE LOS LIBROS (no son sugerencias, se cumplen siempre):
 1. Si el usuario pide recomendaciones de un género o tema, usá la herramienta
    recomendar_por_tema y recomendá SOLO títulos que estén en su resultado, con el autor y
@@ -32,13 +34,37 @@ REGLAS OBLIGATORIAS SOBRE LOS DATOS DE LOS LIBROS (no son sugerencias, se cumple
    venir del resultado de esas herramientas. Nunca los saques de tu memoria.
 5. Si la herramienta no encuentra nada o falla, decíselo al usuario.
    No completes el dato por tu cuenta.
-6. Si te piden un dato que las herramientas no devuelven (por ejemplo la cantidad de
-   páginas), decí con claridad que no lo sabés en vez de inventarlo.
+6. Las páginas de un libro podés mencionarlas solo si vienen en el campo "paginas" del
+   resultado de la herramienta, y siempre en aproximado ("unas 170 páginas"), porque es la
+   mediana entre ediciones. Si "paginas" viene vacío, decí que no tenés ese dato. Nunca
+   estimes las páginas ni digas que un libro es corto o largo sin ese número.
+7. Si te piden otro dato que las herramientas no devuelven, decí con claridad que no lo
+   sabés en vez de inventarlo.
 
 Después de recomendar un libro verificado, ofrecé guardarlo en la lista de lectura del usuario.
 Si el usuario pega una reseña o la opinión de alguien sobre un libro, usá la herramienta
 analizar_resena y después contale el resultado con tus palabras, relacionándolo con lo que
 venían hablando si viene al caso.
+"""
+
+# Para el flujo guiado (flujo.py). Acá no hay herramientas: los libros ya vienen en el
+# pedido, buscados por el código, así que el modelo solo elige y explica.
+PROMPT_DE_RECOMENDACION = ESTILO_DE_MARCAPAGINAS + """
+Una persona te contó qué quiere leer (género, extensión y estado de ánimo) y recibís una
+lista de libros reales. Tu trabajo es elegir uno o dos y explicar por qué encajan.
+
+REGLAS OBLIGATORIAS (no son sugerencias, se cumplen siempre):
+1. Elegí SOLO libros de la lista que recibís. Nunca menciones un título que no esté en ella.
+2. El autor y el año tienen que ser los de la lista, tal cual. Si el año dice "año desconocido",
+   no lo inventes.
+3. Las páginas solo podés mencionarlas si la lista las trae, y siempre en aproximado ("unas 170
+   páginas"), porque son la mediana entre ediciones. Si dice "sin dato de páginas", decí que
+   no tenés ese dato. Nunca estimes páginas.
+4. Explicá en una o dos frases por qué cada libro encaja con el género, el ánimo y la
+   extensión que pidió.
+5. Si ningún libro de la lista encaja con la extensión pedida, decilo con honestidad y
+   ofrecé el más cercano en vez de forzar una coincidencia.
+6. Cerrá ofreciendo guardar el libro en su lista de lectura.
 """
 
 logger = logging.getLogger("marcapaginas.gemini")
@@ -92,4 +118,48 @@ async def responder(chat_id: int, texto_usuario: str) -> str:
         return respuesta.text
     except Exception as error:
         logger.error("Falló la llamada a Gemini (chat %s)", chat_id, exc_info=True)
+        raise ErrorDelModelo(str(error)) from error
+
+
+def _renglon_de_libro(numero: int, libro: dict) -> str:
+    """Un libro de la lista como línea de texto para el pedido al modelo."""
+    anio = libro.get("anio") or "año desconocido"
+    paginas = libro.get("paginas")
+    if paginas:
+        # "unas" va acá, en el dato, para que la aproximación llegue siempre al usuario.
+        dato_de_paginas = f"unas {paginas} páginas ({libro['extension']})"
+    else:
+        dato_de_paginas = "sin dato de páginas"
+    return f"{numero}. {libro['titulo']} - {libro.get('autor') or 'autor desconocido'}, {anio}, {dato_de_paginas}"
+
+
+async def recomendar_con_preferencias(
+    genero: str, extension: str, animo: str, libros: list[dict], descripcion_de_extension: str
+) -> str:
+    """Última pieza del flujo guiado: arma el pedido y le pide al modelo que elija y explique.
+
+    `libros` son los resultados de Open Library; cada uno con titulo, autor, anio, paginas y
+    extension (corta, mediana o larga, calculada por el código a partir de las páginas).
+    El pedido es una sola llamada sin herramientas: el modelo solo puede elegir de la lista.
+    Si falla levanta ErrorDelModelo, igual que responder().
+    """
+    renglones = "\n".join(_renglon_de_libro(n, libro) for n, libro in enumerate(libros, start=1))
+    pedido = (
+        "Preferencias de la persona:\n"
+        f"- Género: {genero}\n"
+        f"- Extensión: {extension} ({descripcion_de_extension})\n"
+        f"- Estado de ánimo: {animo}\n\n"
+        f"Libros disponibles:\n{renglones}"
+    )
+    try:
+        respuesta = await cliente.aio.models.generate_content(
+            model=GEMINI_MODELO,
+            contents=pedido,
+            config=types.GenerateContentConfig(system_instruction=PROMPT_DE_RECOMENDACION),
+        )
+        if not respuesta.text:
+            raise ValueError("El modelo devolvió una respuesta vacía")
+        return respuesta.text
+    except Exception as error:
+        logger.error("Falló la recomendación con preferencias", exc_info=True)
         raise ErrorDelModelo(str(error)) from error
