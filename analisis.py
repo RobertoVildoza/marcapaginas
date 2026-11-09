@@ -10,7 +10,7 @@ from typing import Literal
 from google.genai import types
 from pydantic import BaseModel, Field
 
-from config import GEMINI_MODELO, cliente
+from config import GEMINI_MODELO_ANALISIS, cliente
 
 # Instrucción propia, distinta de PROMPT_DE_SISTEMA: esto es extracción de datos, no charla.
 INSTRUCCION_DE_ANALISIS = """\
@@ -47,7 +47,9 @@ async def analizar_resena(texto: str) -> dict:
     """
     try:
         respuesta = await cliente.aio.models.generate_content(
-            model=GEMINI_MODELO,
+            # Clasificación y extracción con esquema fijo: no necesita el modelo más grande,
+            # y así no compite con la conversación.
+            model=GEMINI_MODELO_ANALISIS,
             contents=texto,
             config=types.GenerateContentConfig(
                 system_instruction=INSTRUCCION_DE_ANALISIS,

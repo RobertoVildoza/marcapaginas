@@ -25,4 +25,6 @@ cliente = genai.Client(api_key=GEMINI_API_KEY)
 # Opcionales: tienen valor por defecto, así que no hace falta definirlas.
 # Para cambiar de modelo alcanza con poner GEMINI_MODELO=... en el .env.
 GEMINI_MODELO = os.getenv("GEMINI_MODELO") or "gemini-3.5-flash"
+# Modelo del análisis de reseñas (analisis.py), separado del de la conversación.
+GEMINI_MODELO_ANALISIS = os.getenv("GEMINI_MODELO_ANALISIS") or "gemini-3.5-flash-lite"
 RUTA_DB = os.getenv("RUTA_DB") or "marcapaginas.db"
