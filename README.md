@@ -73,7 +73,7 @@ reiniciá el bot.
 | `/start` | Saludo inicial. |
 | `/help` | Lista los comandos. |
 | `/lista` | Muestra tu lista de lectura. |
-| `/resena <texto>` | Analiza una reseña: sentimiento, aspectos elogiados y criticados, síntesis. |
+| `/analizar <texto>` | Analiza una reseña: sentimiento, aspectos elogiados y criticados, síntesis. |
 | `/queleo` | Te hace tres preguntas (género, extensión, ánimo) y te recomienda qué leer. Si lo dejás a medias, vence a los 30 minutos. |
 | `/cancelar` | Sale de `/queleo` en cualquier momento. |
 | `/olvidar` | Borra la conversación (la lista de lectura se conserva). |

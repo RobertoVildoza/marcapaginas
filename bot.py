@@ -54,7 +54,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/lista - Tu lista de lectura\n"
         "/queleo - Te hago tres preguntas y te recomiendo qué leer\n"
         "/cancelar - Salgo de /queleo en cualquier momento\n"
-        "/resena - Analizo una reseña: /resena seguido del texto\n"
+        "/analizar - Analizo una reseña: /analizar seguido del texto\n"
         "/olvidar - Borro lo que recuerdo de nuestra conversación\n\n"
         "También podés escribirme cualquier mensaje y charlamos sobre libros."
     )
@@ -76,19 +76,19 @@ async def lista(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Tu lista de lectura:\n\n" + "\n".join(renglones))
 
 
-# Comando /resena
+# Comando /analizar
 async def resena(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Analiza el texto que viene después de /resena, sin pasar por el modelo conversacional."""
+    """Analiza el texto que viene después de /analizar, sin pasar por el modelo conversacional."""
     partes = update.message.text.split(maxsplit=1)  # [comando, resto del mensaje]
     if len(partes) < 2:
         await update.message.reply_text(
-            "Escribí /resena seguido del texto de la reseña. Por ejemplo:\n"
-            "/resena Me encantó la trama pero el final me pareció apurado."
+            "Escribí /analizar seguido del texto de la reseña. Por ejemplo:\n"
+            "/analizar Me encantó la trama pero el final me pareció apurado."
         )
         return
 
     chat_id = update.effective_chat.id
-    logger.info("Nuevo /resena (chat %s)", chat_id)
+    logger.info("Nuevo /analizar (chat %s)", chat_id)
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     resultado = await analisis.analizar_resena(partes[1])
@@ -206,7 +206,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", ayuda))
     app.add_handler(CommandHandler("lista", lista))
-    app.add_handler(CommandHandler("resena", resena))
+    app.add_handler(CommandHandler("analizar", resena))
     app.add_handler(CommandHandler("queleo", que_leo))
     app.add_handler(CommandHandler("cancelar", cancelar))
     app.add_handler(CommandHandler("olvidar", olvidar))
