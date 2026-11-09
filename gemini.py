@@ -7,7 +7,7 @@ from google.genai import types
 
 import herramientas
 import memoria
-from config import GEMINI_MODELO, cliente
+from config import GEMINI_MODELO, SEGUNDOS_MAXIMOS_DEL_MODELO, cliente
 
 # Pedimos texto plano porque Telegram no interpreta Markdown si no se lo pedimos, y pedírselo
 # puede hacer que rechace el mensaje entero si el modelo genera un asterisco suelto.
@@ -69,11 +69,6 @@ REGLAS OBLIGATORIAS (no son sugerencias, se cumplen siempre):
 """
 
 logger = logging.getLogger("marcapaginas.gemini")
-
-# Tope de espera por llamada al modelo. Con un 503 el SDK reintenta por dentro y el usuario
-# esperaba más de 60 segundos; 30 da margen para una llamada con dos idas y vueltas de
-# herramientas, que es lo más lento que vimos funcionando bien.
-SEGUNDOS_MAXIMOS_DEL_MODELO = 30
 
 # Gemini llama "user" y "model" a los roles; en nuestra base son "usuario" y "bot".
 ROL_PARA_GEMINI = {"usuario": "user", "bot": "model"}

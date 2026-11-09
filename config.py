@@ -28,3 +28,8 @@ GEMINI_MODELO = os.getenv("GEMINI_MODELO") or "gemini-3.5-flash"
 # Modelo del análisis de reseñas (analisis.py), separado del de la conversación.
 GEMINI_MODELO_ANALISIS = os.getenv("GEMINI_MODELO_ANALISIS") or "gemini-3.5-flash-lite"
 RUTA_DB = os.getenv("RUTA_DB") or "marcapaginas.db"
+
+# Tope de espera por llamada al modelo. Con un 503 el SDK reintenta por dentro y el usuario
+# esperaba más de 60 segundos; 30 da margen para una llamada con dos idas y vueltas de
+# herramientas, que es lo más lento que vimos funcionando bien.
+SEGUNDOS_MAXIMOS_DEL_MODELO = 30

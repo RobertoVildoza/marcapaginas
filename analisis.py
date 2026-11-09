@@ -4,13 +4,14 @@ A diferencia del function calling, acá no hay conversación ni herramientas:
 es un pedido propio a Gemini que devuelve datos con una forma fija.
 """
 
+import asyncio
 import logging
 from typing import Literal
 
 from google.genai import types
 from pydantic import BaseModel, Field
 
-from config import GEMINI_MODELO_ANALISIS, cliente
+from config import GEMINI_MODELO_ANALISIS, SEGUNDOS_MAXIMOS_DEL_MODELO, cliente
 
 # Instrucción propia, distinta de PROMPT_DE_SISTEMA: esto es extracción de datos, no charla.
 INSTRUCCION_DE_ANALISIS = """\
@@ -46,22 +47,34 @@ async def analizar_resena(texto: str) -> dict:
     Si falló: {"estado": "error", "mensaje": ...}. No levanta excepción; el error queda en el log.
     """
     try:
-        respuesta = await cliente.aio.models.generate_content(
-            # Clasificación y extracción con esquema fijo: no necesita el modelo más grande,
-            # y así no compite con la conversación.
-            model=GEMINI_MODELO_ANALISIS,
-            contents=texto,
-            config=types.GenerateContentConfig(
-                system_instruction=INSTRUCCION_DE_ANALISIS,
-                response_mime_type="application/json",
-                response_schema=AnalisisDeResena,
-                # Sin tools: no se pueden combinar con response_schema.
+        respuesta = await asyncio.wait_for(
+            cliente.aio.models.generate_content(
+                # Clasificación y extracción con esquema fijo: no necesita el modelo más grande,
+                # y así no compite con la conversación.
+                model=GEMINI_MODELO_ANALISIS,
+                contents=texto,
+                config=types.GenerateContentConfig(
+                    system_instruction=INSTRUCCION_DE_ANALISIS,
+                    response_mime_type="application/json",
+                    response_schema=AnalisisDeResena,
+                    # Sin tools: no se pueden combinar con response_schema.
+                ),
             ),
+            timeout=SEGUNDOS_MAXIMOS_DEL_MODELO,
         )
         analisis = respuesta.parsed
         if not isinstance(analisis, AnalisisDeResena):
             raise ValueError("El modelo no devolvió un JSON que respete el esquema")
         return {"estado": "ok", **analisis.model_dump()}
+    except asyncio.TimeoutError:
+        logger.error(
+            "Gemini no respondió en %d segundos (análisis): se corta por tiempo",
+            SEGUNDOS_MAXIMOS_DEL_MODELO,
+        )
+        return {
+            "estado": "error",
+            "mensaje": "El análisis tardó demasiado en responder.",
+        }
     except Exception:
         logger.error("Falló el análisis de la reseña", exc_info=True)
         return {
