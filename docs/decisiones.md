@@ -8,9 +8,12 @@ Tres decisiones que tomamos midiendo en lugar de suponer.
 valor por defecto en `config.py`. Cambiar de modelo es cambiar una línea del `.env`, sin tocar código.
 
 **Qué medimos:**
-- `gemini-2.5-flash`, que usamos al principio, dejó de estar disponible para cuentas nuevas:
-  la API respondió 404 con el mensaje "no longer available to new users".
-- `gemini-3.1-lite` no existe: la API respondió 404. El nombre real es `gemini-3.1-flash-lite`.
+- `gemini-2.5-flash`, que usamos al principio: el 08/11/2026 Claude lo llamó desde el bot y la API
+  respondió 404 con el mensaje "no longer available to new users".
+- `gemini-3.1-lite`: Roberto reportó que la API responde 404 con ese nombre (lo vio en su
+  `.env`, Claude no lo probó). El 08/11/2026 Claude corrió `listar_modelos.py` con la clave de
+  Roberto: devolvió 26 modelos, entre ellos `gemini-3.1-flash-lite`, y ninguno llamado
+  `gemini-3.1-lite`.
 
 **Por qué:** los nombres de modelo caducan y es fácil equivocarse al escribirlos. Si el nombre
 estuviera en el código, cada cambio sería una modificación del programa. Para saber qué nombres
@@ -22,8 +25,14 @@ puede usar cada clave se corre `python listar_modelos.py`, que consulta a la API
 **Qué elegimos:** la conversación usa `GEMINI_MODELO` (por defecto `gemini-3.5-flash`) y el
 análisis de reseñas usa `GEMINI_MODELO_ANALISIS` (por defecto `gemini-3.5-flash-lite`).
 
-**Qué medimos:** el 09/11/2026 `gemini-3.5-flash` devolvió 503 por saturación varias veces
-seguidas, mientras que `gemini-3.5-flash-lite` respondía en 2 segundos.
+**Qué medimos:** estos datos salen de los logs del bot, en corridas en la máquina de Roberto
+(no son pruebas de Claude), así que se pueden verificar ahí:
+- El 09/11/2026 `gemini-3.5-flash` devolvió 503 a las 10:25, 10:29 y 11:22.
+- El 09/11/2026 `gemini-3.5-flash-lite` respondió 200 OK a las 11:20:55, dos segundos después
+  del pedido.
+
+Antecedente, medido por Claude el 08/11/2026: `gemini-3.8-flash` dio 503 en cuatro intentos
+seguidos y `gemini-3.7-flash` se colgó sin responder.
 
 **Por qué:** el análisis es clasificación y extracción con un esquema fijo
 (sentimiento, aspectos elogiados y criticados, síntesis); no necesita el modelo grande.
@@ -34,8 +43,10 @@ Además, así el análisis no compite con la conversación por el mismo modelo n
 **Qué elegimos:** `recomendar_por_tema` consulta
 `https://openlibrary.org/search.json` con `q=subject:"<tema>"`, `limit=5` y sin `sort`.
 
-**Qué medimos:** con `comparar_rutas.py` (en la raíz del repositorio) traje 5 resultados por
-cada ruta para tres temas. No usa Gemini, así que no gasta cuota.
+**Qué medimos:** Claude corrió `comparar_rutas.py` (en la raíz del repositorio) el 09/11/2026 y
+trajo 5 resultados por cada ruta para tres temas, consultando Open Library en ese momento. Los
+resultados pueden cambiar si Open Library cambia sus datos; el script permite repetir la
+medición. No usa Gemini, así que no gasta cuota.
 
 | Tema | A) `/subjects/<tema>.json` | B) `search.json` con `subject:` |
 |---|---|---|
@@ -50,11 +61,13 @@ También probamos el parámetro `sort` de `search.json`:
 | `rating` | Bien en ciencia ficción (Project Hail Mary, The Martian), pero se sale del género en horror (Maus, The Hobbit) y en mystery (Watchmen, Harry Potter). |
 | `readinglog`, `want_to_read`, `already_read` | Libros populares pero fuera de género: Harry Potter en mystery y en ciencia ficción, Twilight y The Hobbit en horror. |
 | `editions` | Parecido a la ruta A: clásicos de dominio público. |
-| `new` | Fechas imposibles (2027 y hasta 2098), datos mal cargados. |
+| `new` | Años futuros (2027 y hasta 2098). |
 | (ninguno) | El mejor orden: libros reconocibles como del género. |
 
-**Por qué:** el endpoint `/subjects` devuelve clásicos de dominio público (Alicia en el País de
-las Maravillas y Drácula como ciencia ficción) porque prioriza libros con edición digital libre.
-`search.json` con `subject:` devolvió Asimov, Strugatski y Simmons, y ningún `sort` mejoró ese
-orden por defecto. Los temas de Open Library están en inglés, así que la herramienta le pide al
-modelo que traduzca el tema antes de consultar.
+**Por qué:** en la medición, el endpoint `/subjects` devolvió clásicos de dominio público
+(Alicia en el País de las Maravillas y Drácula como ciencia ficción), mientras que `search.json`
+con `subject:` devolvió Asimov, Strugatski y Simmons, y ningún `sort` mejoró ese orden por
+defecto. La explicación de por qué `/subjects` favorece esos clásicos (que prioriza libros con
+edición digital libre) es una hipótesis nuestra: no la verificamos en la documentación de Open
+Library. Por diseño, la herramienta pide el tema en inglés porque los temas que probamos
+estaban en inglés.
