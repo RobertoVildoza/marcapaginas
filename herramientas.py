@@ -12,6 +12,8 @@ import httpx
 import analisis
 import memoria
 
+# Cada log de invocación lleva extra={"herramienta": nombre}: evaluar.py lee ese campo,
+# así que se puede reescribir el texto del mensaje sin romper las pruebas.
 logger = logging.getLogger("marcapaginas.herramientas")
 
 URL_OPEN_LIBRARY = "https://openlibrary.org/search.json"
@@ -53,7 +55,10 @@ async def buscar_libro(consulta: str) -> dict:
         ser null si no se conoce). Si es "sin_resultados" o "error", trae "mensaje" con lo
         que pasó, para que se lo expliques al usuario.
     """
-    logger.info("Herramienta buscar_libro invocada con consulta=%r", consulta)
+    logger.info(
+        "Herramienta buscar_libro invocada con consulta=%r", consulta,
+        extra={"herramienta": "buscar_libro"},
+    )
     parametros = {
         "q": consulta,
         "limit": 3,
@@ -104,7 +109,10 @@ async def recomendar_por_tema(tema: str) -> dict:
         ser null si no se conoce). Si es "sin_resultados" o "error", trae "mensaje" con lo
         que pasó, para que se lo expliques al usuario.
     """
-    logger.info("Herramienta recomendar_por_tema invocada con tema=%r", tema)
+    logger.info(
+        "Herramienta recomendar_por_tema invocada con tema=%r", tema,
+        extra={"herramienta": "recomendar_por_tema"},
+    )
     tema_limpio = " ".join(tema.replace('"', " ").lower().split())
     if not tema_limpio:
         return {"estado": "sin_resultados", "mensaje": "No se indicó ningún tema."}
@@ -161,7 +169,10 @@ async def analizar_resena(texto: str) -> dict:
         (listas de textos cortos) y "sintesis" (una línea con el veredicto). Si es "error",
         trae "mensaje" con lo que pasó, para que se lo expliques al usuario.
     """
-    logger.info("Herramienta analizar_resena invocada (%d caracteres)", len(texto))
+    logger.info(
+        "Herramienta analizar_resena invocada (%d caracteres)", len(texto),
+        extra={"herramienta": "analizar_resena"},
+    )
     return await analisis.analizar_resena(texto)
 
 
@@ -189,6 +200,7 @@ def construir_herramientas(chat_id: int) -> list:
         logger.info(
             "Herramienta guardar_en_lista invocada con titulo=%r, autor=%r, anio=%r (chat %s)",
             titulo, autor, anio, chat_id,
+            extra={"herramienta": "guardar_en_lista"},
         )
         agregado = memoria.agregar_a_lista(chat_id, titulo, autor, anio)
         return {"estado": "guardado" if agregado else "ya_estaba", "titulo": titulo}
@@ -202,7 +214,10 @@ def construir_herramientas(chat_id: int) -> list:
             Un diccionario con "libros": una lista donde cada libro tiene "titulo", "autor"
             y "anio" (0 si no se conoce). La lista está vacía si no guardó nada todavía.
         """
-        logger.info("Herramienta ver_lista invocada (chat %s)", chat_id)
+        logger.info(
+            "Herramienta ver_lista invocada (chat %s)", chat_id,
+            extra={"herramienta": "ver_lista"},
+        )
         libros = [
             {"titulo": titulo, "autor": autor, "anio": anio}
             for titulo, autor, anio in memoria.leer_lista(chat_id)
