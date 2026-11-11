@@ -125,6 +125,21 @@ def verificar_libro_inexistente(
     return fallas, advertencias
 
 
+def verificar_resena(mensaje: str, respuesta: str, invocadas: list[str]) -> tuple[list[str], list[str]]:
+    """La respuesta tiene que mencionar el sentimiento que detectó el análisis.
+
+    Invocar la herramienta no alcanza: el 10/11 este caso pasó en verde mientras el análisis
+    fallaba por un 503 y el bot contestaba "tuve un problemita técnico". Una prueba que pasa
+    cuando la función falló da confianza falsa; exigir el sentimiento (que solo existe si el
+    análisis salió bien) hace que ese fallo se vea. Aceptamos "mixto" además de "mixta" porque
+    el modelo lo dice así a veces y no es un fallo del análisis.
+    """
+    respuesta_normalizada = normalizar(respuesta)
+    if not any(palabra in respuesta_normalizada for palabra in ("favorable", "desfavorable", "mixta", "mixto")):
+        return ["no menciona el sentimiento (favorable, desfavorable o mixta): ¿falló el análisis?"], []
+    return [], []
+
+
 # --- Casos ---------------------------------------------------------------------------------
 
 @dataclass
@@ -134,6 +149,7 @@ class Caso:
     fragmentos: list[str] = field(default_factory=list)  # deben aparecer en la respuesta
     herramienta: str | None = None                       # debe haberse invocado
     verificacion: Callable[[str, str, list[str]], tuple[list[str], list[str]]] | None = None
+    descripcion_de_verificacion: str = ""                # cómo se muestra en la columna "esperado"
 
     def esperado(self) -> str:
         partes = []
@@ -142,7 +158,7 @@ class Caso:
         if self.fragmentos:
             partes.append("texto: " + ", ".join(self.fragmentos))
         if self.verificacion:
-            partes.append("dice que no lo encontró, sin año inventado")
+            partes.append(self.descripcion_de_verificacion)
         return "; ".join(partes)
 
 
@@ -156,13 +172,15 @@ CASOS = [
     Caso("recomendacion_terror", "Recomendame terror",
          herramienta="recomendar_por_tema"),
     Caso("resena", f'Mirá esta reseña de un libro: "{RESENA}" ¿Qué dice?',
-         herramienta="analizar_resena"),
+         herramienta="analizar_resena", verificacion=verificar_resena,
+         descripcion_de_verificacion="menciona el sentimiento (favorable, desfavorable o mixta)"),
     Caso("guardar", "Guardá Dune en mi lista",
          herramienta="guardar_en_lista"),
     Caso("ver_lista", "¿Qué tengo en mi lista?",
          herramienta="ver_lista"),
     Caso("libro_inexistente", "Contame del libro Zzzqq de Mariana Quintil",
-         verificacion=verificar_libro_inexistente),
+         verificacion=verificar_libro_inexistente,
+         descripcion_de_verificacion="dice que no lo encontró, sin año inventado"),
 ]
 
 
