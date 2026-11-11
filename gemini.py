@@ -1,8 +1,10 @@
 """Cliente del modelo Gemini (SDK google-genai, versión asíncrona)."""
 
 import asyncio
+import json
 import logging
 
+import herramientas
 import memoria
 from config import GEMINI_MODELO, SEGUNDOS_MAXIMOS_DEL_MODELO, cliente
 from prompts import PROMPT_DE_RECOMENDACION, PROMPT_DE_SISTEMA
@@ -11,6 +13,10 @@ logger = logging.getLogger("marcapaginas.gemini")
 
 # En la base los roles son "usuario" y "bot"; la Interactions API los llama por tipo de paso.
 TIPO_DE_PASO = {"usuario": "user_input", "bot": "model_output"}
+
+# Tope de idas y vueltas con el modelo por mensaje del usuario (cada vuelta que pide funciones
+# cuenta una). Evita un bucle infinito si el modelo siguiera pidiendo herramientas.
+MAXIMO_DE_VUELTAS = 5
 
 
 class ErrorDelModelo(Exception):
@@ -64,28 +70,100 @@ async def responder(chat_id: int, texto_usuario: str) -> str:
         logger.error("Falló la lectura del historial (chat %s)", chat_id, exc_info=True)
         historial = []
 
+    declaraciones, funciones = herramientas.construir_herramientas(chat_id)
     try:
-        # cliente.aio es la versión asíncrona del cliente: se espera con await.
-        interaccion = await asyncio.wait_for(
-            cliente.aio.interactions.create(
-                model=GEMINI_MODELO,
-                system_instruction=PROMPT_DE_SISTEMA,
-                input=armar_entrada(historial, texto_usuario),
-                # store=False: la memoria la administramos nosotros en SQLite, no Google.
-                store=False,
+        # El tope de tiempo envuelve el ciclo entero (todas las vueltas y las herramientas),
+        # no cada llamada: así el usuario espera como máximo SEGUNDOS_MAXIMOS_DEL_MODELO.
+        return await asyncio.wait_for(
+            _ciclo_de_herramientas(
+                chat_id, armar_entrada(historial, texto_usuario), declaraciones, funciones
             ),
             timeout=SEGUNDOS_MAXIMOS_DEL_MODELO,
         )
-        return _texto_de(interaccion)
     except asyncio.TimeoutError as error:
         logger.error(
             "Gemini no respondió en %d segundos (chat %s): se corta por tiempo",
             SEGUNDOS_MAXIMOS_DEL_MODELO, chat_id,
         )
         raise ErrorDelModelo("El modelo tardó demasiado en responder") from error
+    except ErrorDelModelo:
+        raise  # ya registrado donde se levantó
     except Exception as error:
         logger.error("Falló la llamada a Gemini (chat %s)", chat_id, exc_info=True)
         raise _como_error_del_modelo(error) from error
+
+
+def _resultado_en_json(resultado) -> str:
+    return json.dumps(resultado, ensure_ascii=False, default=str)
+
+
+async def _ejecutar_llamado(paso, funciones: dict) -> dict:
+    """Ejecuta un function_call y devuelve el paso function_result que corresponde.
+
+    Nunca levanta: si la función no existe o falla, el modelo recibe un resultado de error y
+    puede explicárselo al usuario.
+    """
+    resultado = {"type": "function_result", "call_id": paso.id, "name": paso.name}
+    funcion = funciones.get(paso.name)
+    if funcion is None:
+        logger.error("El modelo pidió una herramienta que no existe: %r", paso.name)
+        resultado["is_error"] = True
+        resultado["result"] = _resultado_en_json(
+            {"estado": "error", "mensaje": f"La herramienta {paso.name} no existe."}
+        )
+        return resultado
+    try:
+        resultado["result"] = _resultado_en_json(await funcion(**(paso.arguments or {})))
+    except Exception:
+        logger.error("Falló la herramienta %s", paso.name, exc_info=True)
+        resultado["is_error"] = True
+        resultado["result"] = _resultado_en_json(
+            {"estado": "error", "mensaje": f"La herramienta {paso.name} falló."}
+        )
+    return resultado
+
+
+async def _ciclo_de_herramientas(
+    chat_id: int, entrada: list, declaraciones: list[dict], funciones: dict
+) -> str:
+    """Llama al modelo y, mientras pida funciones, las ejecuta y le devuelve los resultados.
+
+    Con store=False no hay previous_interaction_id: en cada vuelta reenviamos el input completo.
+    Lo verificado (prueba_herramientas.py) es que los pasos que devuelve el modelo hay que
+    reenviarlos tal cual vinieron, con el thought y su signature; armarlos a mano da 400.
+    """
+    for vuelta in range(1, MAXIMO_DE_VUELTAS + 1):
+        interaccion = await cliente.aio.interactions.create(
+            model=GEMINI_MODELO,
+            system_instruction=PROMPT_DE_SISTEMA,
+            input=entrada,
+            tools=declaraciones,
+            # store=False: la memoria la administramos nosotros en SQLite, no Google.
+            store=False,
+        )
+        if interaccion.status != "requires_action":
+            return _texto_de(interaccion)
+
+        llamados = [paso for paso in interaccion.steps if paso.type == "function_call"]
+        if not llamados:
+            raise ValueError("El modelo pidió una acción pero no trae ninguna función")
+        logger.info(
+            "Vuelta %d (chat %s): el modelo pide %s",
+            vuelta, chat_id, ", ".join(paso.name for paso in llamados),
+        )
+        # Los pasos del modelo vuelven al input sin reconstruirlos.
+        entrada.extend(
+            paso.model_dump(mode="json", exclude_none=True, by_alias=True)
+            for paso in interaccion.steps
+        )
+        # Puede pedir varias funciones en la misma vuelta: un function_result por cada una.
+        entrada.extend([await _ejecutar_llamado(paso, funciones) for paso in llamados])
+
+    logger.error(
+        "El modelo siguió pidiendo funciones después de %d vueltas (chat %s)",
+        MAXIMO_DE_VUELTAS, chat_id,
+    )
+    raise ErrorDelModelo(f"El modelo no terminó después de {MAXIMO_DE_VUELTAS} vueltas")
 
 
 def _renglon_de_libro(numero: int, libro: dict) -> str:
