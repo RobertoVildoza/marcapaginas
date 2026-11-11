@@ -32,6 +32,28 @@ MENSAJE_DE_ERROR = (
 )
 
 
+MENSAJE_POR_CUPO = (
+    "Estoy recibiendo demasiadas consultas en este momento. "
+    "Probá de nuevo en un minuto, ¿sí?"
+)
+MENSAJE_POR_CONFIGURACION = (
+    "Tengo un problema de configuración y no puedo responderte ahora. "
+    "Ya quedó registrado para que lo revisen."
+)
+MENSAJE_POR_OTRO_ERROR = (
+    "Tuve un problema al pensar la respuesta. Volvé a preguntarme, por favor."
+)
+
+
+def mensaje_de_error(error: gemini.ErrorDelModelo) -> str:
+    """Elige qué decirle al usuario según el código del error (None si fue de red o de tiempo)."""
+    if error.codigo == 429:
+        return MENSAJE_POR_CUPO
+    if error.codigo in (401, 403):
+        return MENSAJE_POR_CONFIGURACION
+    return MENSAJE_POR_OTRO_ERROR
+
+
 LIMITE_DE_TELEGRAM = 4096  # caracteres por mensaje; más que eso, Telegram lo rechaza
 
 
@@ -161,9 +183,9 @@ async def responder_con_el_flujo(update: Update, chat_id: int, texto: str) -> No
     """Le pasa el texto al flujo guiado y envía lo que conteste."""
     try:
         respuesta = await flujo.avanzar(chat_id, texto)
-    except gemini.ErrorDelModelo:
+    except gemini.ErrorDelModelo as error:
         # El flujo queda en su último paso: el usuario puede reintentar escribiendo de nuevo.
-        await update.message.reply_text(MENSAJE_DE_ERROR)
+        await update.message.reply_text(mensaje_de_error(error))
         return
 
     await responder_largo(update, respuesta.texto)
@@ -200,10 +222,10 @@ async def conversar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # así el mensaje nuevo no queda duplicado en el pedido al modelo.
     try:
         respuesta = await gemini.responder(chat_id, texto)
-    except gemini.ErrorDelModelo:
+    except gemini.ErrorDelModelo as error:
         # El detalle ya quedó en el log. Al usuario le damos un aviso amable
         # y no guardamos nada: el historial es la conversación, no los errores.
-        await update.message.reply_text(MENSAJE_DE_ERROR)
+        await update.message.reply_text(mensaje_de_error(error))
         return
 
     await responder_largo(update, respuesta)

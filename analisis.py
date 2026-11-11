@@ -5,10 +5,10 @@ es un pedido propio a Gemini que devuelve datos con una forma fija.
 """
 
 import asyncio
+import json
 import logging
 from typing import Literal
 
-from google.genai import types
 from pydantic import BaseModel, Field
 
 from config import GEMINI_MODELO_ANALISIS, SEGUNDOS_MAXIMOS_DEL_MODELO, cliente
@@ -25,7 +25,7 @@ logger = logging.getLogger("marcapaginas.analisis")
 
 
 class AnalisisDeResena(BaseModel):
-    """Esquema de la salida. El SDK lo convierte en el response_schema del pedido."""
+    """Análisis de una reseña de un libro."""  # va como descripción en el esquema JSON
 
     sentimiento: Literal["favorable", "desfavorable", "mixta"] = Field(
         description="Valoración general de la reseña."
@@ -39,6 +39,18 @@ class AnalisisDeResena(BaseModel):
     sintesis: str = Field(description="Una sola línea que resume el veredicto.")
 
 
+# Formato de salida de la Interactions API. El esquema sale del modelo pydantic tal cual:
+# la documentación del SDK ignora minLength, maxLength, minProperties, maxProperties,
+# uniqueItems, contains, minContains y maxContains, y rechaza con 400 los esquemas demasiado
+# complejos; este usa solo type, enum, items, properties, required, description y title,
+# sin $defs ni referencias, así que no hubo claves que sacar.
+FORMATO_DE_RESPUESTA = {
+    "type": "text",
+    "mime_type": "application/json",
+    "schema": AnalisisDeResena.model_json_schema(),
+}
+
+
 async def analizar_resena(texto: str) -> dict:
     """Analiza el texto de una reseña y devuelve un diccionario.
 
@@ -47,24 +59,26 @@ async def analizar_resena(texto: str) -> dict:
     Si falló: {"estado": "error", "mensaje": ...}. No levanta excepción; el error queda en el log.
     """
     try:
-        respuesta = await asyncio.wait_for(
-            cliente.aio.models.generate_content(
+        interaccion = await asyncio.wait_for(
+            cliente.aio.interactions.create(
                 # Clasificación y extracción con esquema fijo: no necesita el modelo más grande,
                 # y así no compite con la conversación.
                 model=GEMINI_MODELO_ANALISIS,
-                contents=texto,
-                config=types.GenerateContentConfig(
-                    system_instruction=INSTRUCCION_DE_ANALISIS,
-                    response_mime_type="application/json",
-                    response_schema=AnalisisDeResena,
-                    # Sin tools: no se pueden combinar con response_schema.
-                ),
+                system_instruction=INSTRUCCION_DE_ANALISIS,
+                input=texto,
+                # store=False: no guardamos nada del lado de Google.
+                store=False,
+                # El mime_type ya va dentro de response_format. NO pasar response_mime_type
+                # suelto: aunque la documentación del SDK dice que es obligatorio, la API
+                # estable lo rechaza con 400 ("only available in v1beta").
+                response_format=FORMATO_DE_RESPUESTA,
+                # Sin tools: es una sola llamada de extracción.
             ),
             timeout=SEGUNDOS_MAXIMOS_DEL_MODELO,
         )
-        analisis = respuesta.parsed
-        if not isinstance(analisis, AnalisisDeResena):
-            raise ValueError("El modelo no devolvió un JSON que respete el esquema")
+        # Ya no hay respuesta.parsed: parseamos y validamos nosotros. Si el JSON no es válido
+        # o no cumple el esquema, levanta y cae en el camino de error de abajo.
+        analisis = AnalisisDeResena.model_validate(json.loads(interaccion.output_text or ""))
         return {"estado": "ok", **analisis.model_dump()}
     except asyncio.TimeoutError:
         logger.error(

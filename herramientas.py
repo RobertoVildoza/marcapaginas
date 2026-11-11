@@ -1,7 +1,9 @@
 """Herramientas que Gemini puede llamar (function calling).
 
-El SDK arma la descripción de cada herramienta leyendo su docstring y sus tipos:
-por eso los docstrings de abajo son la interfaz con el modelo, no un simple comentario.
+Con la Interactions API el ciclo de herramientas es manual (ver gemini.responder) y el SDK ya
+no lee los docstrings: lo que el modelo ve de cada herramienta es su DECLARACION, un
+diccionario JSON escrito a mano arriba de la función. Esa declaración es el contrato con el
+modelo; el docstring queda para quien lee el código (y debería decir lo mismo).
 """
 
 import logging
@@ -38,6 +40,32 @@ def _elegir_autor(nombres: list[str]) -> str | None:
         if _es_alfabeto_latino(nombre):
             return nombre
     return nombres[0] if nombres else None
+
+
+DECLARACION_BUSCAR_LIBRO = {
+    "type": "function",
+    "name": "buscar_libro",
+    "description": (
+        "Busca libros reales en Open Library por título, autor o ambos. Usala siempre que el "
+        "usuario pregunte un dato concreto de un libro (autor, año de publicación, si existe) "
+        "en vez de responder de memoria. Devuelve un objeto con 'estado' ('ok', "
+        "'sin_resultados' o 'error'). Si es 'ok', trae 'libros': hasta tres libros, cada uno "
+        "con 'titulo', 'autor', 'anio' y 'paginas' (el año y las páginas pueden ser null si no "
+        "se conocen; las páginas son aproximadas, la mediana entre ediciones). Si es "
+        "'sin_resultados' o 'error', trae 'mensaje' con lo que pasó, para que se lo expliques "
+        "al usuario."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "consulta": {
+                "type": "string",
+                "description": 'Texto a buscar, por ejemplo "Rayuela Cortázar" o "Dune".',
+            }
+        },
+        "required": ["consulta"],
+    },
+}
 
 
 async def buscar_libro(consulta: str) -> dict:
@@ -141,6 +169,37 @@ async def buscar_por_tema(tema: str, cantidad: int) -> dict:
     return {"estado": "ok", "libros": libros}
 
 
+DECLARACION_RECOMENDAR_POR_TEMA = {
+    "type": "function",
+    "name": "recomendar_por_tema",
+    "description": (
+        "Consigue libros reales de un género, tema o materia, para poder recomendarlos. Usala "
+        "cuando el usuario pide recomendaciones de un género o tema (por ejemplo ciencia "
+        "ficción, terror, historia) y todavía no sabe qué libro quiere. Recomendá solo títulos "
+        "que estén en el resultado. Si el usuario nombra un libro concreto, usá buscar_libro. "
+        "Devuelve un objeto con 'estado' ('ok', 'sin_resultados' o 'error'). Si es 'ok', trae "
+        "'libros': hasta cinco libros, cada uno con 'titulo', 'autor', 'anio' y 'paginas' (el "
+        "año y las páginas pueden ser null si no se conocen; las páginas son aproximadas, la "
+        "mediana entre ediciones). Si es 'sin_resultados' o 'error', trae 'mensaje' con lo que "
+        "pasó, para que se lo expliques al usuario."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "tema": {
+                "type": "string",
+                "description": (
+                    "El género o tema en inglés y en minúsculas, por ejemplo 'science "
+                    "fiction', 'horror', 'mystery' o 'history'. Open Library organiza sus "
+                    "temas en inglés."
+                ),
+            }
+        },
+        "required": ["tema"],
+    },
+}
+
+
 async def recomendar_por_tema(tema: str) -> dict:
     """Consigue libros reales de un género, tema o materia, para poder recomendarlos.
 
@@ -166,6 +225,32 @@ async def recomendar_por_tema(tema: str) -> dict:
     return await buscar_por_tema(tema, 5)
 
 
+DECLARACION_ANALIZAR_RESENA = {
+    "type": "function",
+    "name": "analizar_resena",
+    "description": (
+        "Analiza una reseña de un libro y devuelve su análisis estructurado. Usala cuando el "
+        "usuario pegue una reseña, una crítica o la opinión de alguien sobre un libro y quiera "
+        "saber qué dice. No la uses para dar tu propia opinión ni para buscar datos de un "
+        "libro. Devuelve un objeto con 'estado' ('ok' o 'error'). Si es 'ok', trae "
+        "'sentimiento' ('favorable', 'desfavorable' o 'mixta'), 'aspectos_elogiados' y "
+        "'aspectos_criticados' (listas de textos cortos) y 'sintesis' (una línea con el "
+        "veredicto). Si es 'error', trae 'mensaje' con lo que pasó, para que se lo expliques "
+        "al usuario."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "texto": {
+                "type": "string",
+                "description": "El texto completo de la reseña, tal como lo pegó el usuario.",
+            }
+        },
+        "required": ["texto"],
+    },
+}
+
+
 async def analizar_resena(texto: str) -> dict:
     """Analiza una reseña de un libro y devuelve su análisis estructurado.
 
@@ -189,8 +274,57 @@ async def analizar_resena(texto: str) -> dict:
     return await analisis.analizar_resena(texto)
 
 
-def construir_herramientas(chat_id: int) -> list:
-    """Devuelve las cinco herramientas, con el chat_id de esta conversación ya cerrado adentro.
+# Las dos que siguen se definen dentro de construir_herramientas (necesitan el chat_id), pero
+# sus declaraciones no dependen de él, así que van acá, justo arriba. Ninguna lleva chat_id:
+# lo pone el código, no el modelo.
+DECLARACION_GUARDAR_EN_LISTA = {
+    "type": "function",
+    "name": "guardar_en_lista",
+    "description": (
+        "Guarda un libro en la lista de lectura del usuario. Usala cuando el usuario quiera "
+        "guardar un libro para leerlo después, o acepte tu oferta de guardarlo. Devuelve un "
+        "objeto con 'estado' ('guardado' o 'ya_estaba') y el 'titulo'."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "titulo": {"type": "string", "description": "Título del libro."},
+            "autor": {"type": "string", "description": "Autor del libro."},
+            "anio": {
+                "type": "integer",
+                "description": "Año de primera publicación. Si no lo sabés, usá 0.",
+            },
+        },
+        "required": ["titulo", "autor", "anio"],
+    },
+}
+
+DECLARACION_VER_LISTA = {
+    "type": "function",
+    "name": "ver_lista",
+    "description": (
+        "Devuelve la lista de lectura del usuario. Usala cuando el usuario pregunte qué tiene "
+        "guardado o pendiente de leer. Devuelve un objeto con 'libros': una lista donde cada "
+        "libro tiene 'titulo', 'autor' y 'anio' (0 si no se conoce). La lista está vacía si no "
+        "guardó nada todavía."
+    ),
+    "parameters": {"type": "object", "properties": {}},
+}
+
+DECLARACIONES = [
+    DECLARACION_BUSCAR_LIBRO,
+    DECLARACION_RECOMENDAR_POR_TEMA,
+    DECLARACION_ANALIZAR_RESENA,
+    DECLARACION_GUARDAR_EN_LISTA,
+    DECLARACION_VER_LISTA,
+]
+
+
+def construir_herramientas(chat_id: int) -> tuple[list[dict], dict]:
+    """Devuelve (declaraciones, funciones) de las cinco herramientas.
+
+    `declaraciones` es la lista que se le manda al modelo; `funciones` mapea nombre -> función
+    ejecutable, con el chat_id de esta conversación ya cerrado adentro donde corresponde.
 
     El chat_id NO es un parámetro de las herramientas: si lo completara el modelo, podría
     inventarlo y leer o escribir la lista de lectura de otra persona.
@@ -237,4 +371,11 @@ def construir_herramientas(chat_id: int) -> list:
         ]
         return {"libros": libros}
 
-    return [buscar_libro, recomendar_por_tema, analizar_resena, guardar_en_lista, ver_lista]
+    funciones = {
+        "buscar_libro": buscar_libro,
+        "recomendar_por_tema": recomendar_por_tema,
+        "analizar_resena": analizar_resena,
+        "guardar_en_lista": guardar_en_lista,
+        "ver_lista": ver_lista,
+    }
+    return DECLARACIONES, funciones
