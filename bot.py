@@ -32,6 +32,32 @@ MENSAJE_DE_ERROR = (
 )
 
 
+LIMITE_DE_TELEGRAM = 4096  # caracteres por mensaje; más que eso, Telegram lo rechaza
+
+
+def partir_mensaje(texto: str, limite: int = LIMITE_DE_TELEGRAM) -> list[str]:
+    """Parte un texto en trozos de hasta `limite` caracteres, cortando donde sea más natural."""
+    partes = []
+    while len(texto) > limite:
+        # Preferimos cortar en salto de línea, después en espacio, y recién al final en seco.
+        corte = texto.rfind("\n", 0, limite)
+        if corte <= 0:
+            corte = texto.rfind(" ", 0, limite)
+        if corte <= 0:
+            corte = limite
+        partes.append(texto[:corte].rstrip())
+        texto = texto[corte:].lstrip()
+    if texto or not partes:
+        partes.append(texto)
+    return partes
+
+
+async def responder_largo(update: Update, texto: str) -> None:
+    """Envía un texto, en varios mensajes si supera el límite de Telegram."""
+    for parte in partir_mensaje(texto):
+        await update.message.reply_text(parte)
+
+
 # Comando /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Saluda al usuario por su nombre."""
@@ -98,11 +124,12 @@ async def resena(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     elogiados = ", ".join(resultado["aspectos_elogiados"]) or "nada en particular"
     criticados = ", ".join(resultado["aspectos_criticados"]) or "nada en particular"
-    await update.message.reply_text(
+    await responder_largo(
+        update,
         f"Sentimiento: {resultado['sentimiento']}\n"
         f"Elogia: {elogiados}\n"
         f"Critica: {criticados}\n"
-        f"Síntesis: {resultado['sintesis']}"
+        f"Síntesis: {resultado['sintesis']}",
     )
 
 
@@ -139,7 +166,7 @@ async def responder_con_el_flujo(update: Update, chat_id: int, texto: str) -> No
         await update.message.reply_text(MENSAJE_DE_ERROR)
         return
 
-    await update.message.reply_text(respuesta.texto)
+    await responder_largo(update, respuesta.texto)
 
     if respuesta.intercambio:  # el flujo terminó: la recomendación pasa a ser parte de la charla
         try:
@@ -179,7 +206,7 @@ async def conversar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(MENSAJE_DE_ERROR)
         return
 
-    await update.message.reply_text(respuesta)
+    await responder_largo(update, respuesta)
 
     # Se guarda después de enviar: si el envío falla, no guardamos como dicho algo que el usuario nunca vio.
     try:
