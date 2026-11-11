@@ -3,21 +3,52 @@
 import asyncio
 import logging
 
-from google.genai import types
-
-import herramientas
 import memoria
 from config import GEMINI_MODELO, SEGUNDOS_MAXIMOS_DEL_MODELO, cliente
 from prompts import PROMPT_DE_RECOMENDACION, PROMPT_DE_SISTEMA
 
 logger = logging.getLogger("marcapaginas.gemini")
 
-# Gemini llama "user" y "model" a los roles; en nuestra base son "usuario" y "bot".
-ROL_PARA_GEMINI = {"usuario": "user", "bot": "model"}
+# En la base los roles son "usuario" y "bot"; la Interactions API los llama por tipo de paso.
+TIPO_DE_PASO = {"usuario": "user_input", "bot": "model_output"}
 
 
 class ErrorDelModelo(Exception):
-    """El modelo no pudo responder (cupo, red, respuesta vacía, etc.)."""
+    """El modelo no pudo responder (cupo, red, respuesta vacía, etc.).
+
+    `codigo` es el status HTTP del error original (429, 401...) o None si no lo hubo
+    (falla de red, tiempo agotado, respuesta vacía).
+    """
+
+    def __init__(self, mensaje: str, codigo: int | None = None):
+        super().__init__(mensaje)
+        self.codigo = codigo
+
+
+def _paso(tipo: str, texto: str) -> dict:
+    return {"type": tipo, "content": [{"type": "text", "text": texto}]}
+
+
+def armar_entrada(historial: list[tuple[str, str]], mensaje_nuevo: str) -> list[dict]:
+    """Convierte las filas del historial (rol, texto) en pasos de la Interactions API.
+
+    Al final agrega el mensaje nuevo del usuario como user_input.
+    """
+    pasos = [_paso(TIPO_DE_PASO[rol], texto) for rol, texto in historial]
+    pasos.append(_paso("user_input", mensaje_nuevo))
+    return pasos
+
+
+def _texto_de(interaccion) -> str:
+    texto = interaccion.output_text
+    if not texto:
+        raise ValueError("El modelo devolvió una respuesta vacía")
+    return texto
+
+
+def _como_error_del_modelo(error: Exception) -> ErrorDelModelo:
+    # Una falla de red no trae status_code: por eso getattr con None por defecto.
+    return ErrorDelModelo(str(error), getattr(error, "status_code", None))
 
 
 async def responder(chat_id: int, texto_usuario: str) -> str:
@@ -33,34 +64,19 @@ async def responder(chat_id: int, texto_usuario: str) -> str:
         logger.error("Falló la lectura del historial (chat %s)", chat_id, exc_info=True)
         historial = []
 
-    # El historial viene de SQLite; el chat del SDK se siembra con él y vive solo
-    # durante este mensaje (el SDK no guarda nada entre mensajes).
-    historial_gemini = [
-        types.Content(
-            role=ROL_PARA_GEMINI[rol], parts=[types.Part.from_text(text=texto)]
-        )
-        for rol, texto in historial
-    ]
-
     try:
         # cliente.aio es la versión asíncrona del cliente: se espera con await.
-        chat = cliente.aio.chats.create(
-            model=GEMINI_MODELO,
-            history=historial_gemini,
-            config=types.GenerateContentConfig(
+        interaccion = await asyncio.wait_for(
+            cliente.aio.interactions.create(
+                model=GEMINI_MODELO,
                 system_instruction=PROMPT_DE_SISTEMA,
-                # Function calling automático: el SDK llama a nuestras funciones async
-                # (con await) cuando el modelo las pide y le devuelve el resultado.
-                tools=herramientas.construir_herramientas(chat_id),
+                input=armar_entrada(historial, texto_usuario),
+                # store=False: la memoria la administramos nosotros en SQLite, no Google.
+                store=False,
             ),
+            timeout=SEGUNDOS_MAXIMOS_DEL_MODELO,
         )
-        respuesta = await asyncio.wait_for(
-            chat.send_message(texto_usuario), timeout=SEGUNDOS_MAXIMOS_DEL_MODELO
-        )
-
-        if not respuesta.text:
-            raise ValueError("El modelo devolvió una respuesta vacía")
-        return respuesta.text
+        return _texto_de(interaccion)
     except asyncio.TimeoutError as error:
         logger.error(
             "Gemini no respondió en %d segundos (chat %s): se corta por tiempo",
@@ -69,7 +85,7 @@ async def responder(chat_id: int, texto_usuario: str) -> str:
         raise ErrorDelModelo("El modelo tardó demasiado en responder") from error
     except Exception as error:
         logger.error("Falló la llamada a Gemini (chat %s)", chat_id, exc_info=True)
-        raise ErrorDelModelo(str(error)) from error
+        raise _como_error_del_modelo(error) from error
 
 
 def _renglon_de_libro(numero: int, libro: dict) -> str:
@@ -103,17 +119,16 @@ async def recomendar_con_preferencias(
         f"Libros disponibles:\n{renglones}"
     )
     try:
-        respuesta = await asyncio.wait_for(
-            cliente.aio.models.generate_content(
+        interaccion = await asyncio.wait_for(
+            cliente.aio.interactions.create(
                 model=GEMINI_MODELO,
-                contents=pedido,
-                config=types.GenerateContentConfig(system_instruction=PROMPT_DE_RECOMENDACION),
+                system_instruction=PROMPT_DE_RECOMENDACION,
+                input=pedido,
+                store=False,  # la memoria es nuestra (SQLite), no de Google
             ),
             timeout=SEGUNDOS_MAXIMOS_DEL_MODELO,
         )
-        if not respuesta.text:
-            raise ValueError("El modelo devolvió una respuesta vacía")
-        return respuesta.text
+        return _texto_de(interaccion)
     except asyncio.TimeoutError as error:
         logger.error(
             "Gemini no respondió en %d segundos (recomendación): se corta por tiempo",
@@ -122,4 +137,4 @@ async def recomendar_con_preferencias(
         raise ErrorDelModelo("El modelo tardó demasiado en responder") from error
     except Exception as error:
         logger.error("Falló la recomendación con preferencias", exc_info=True)
-        raise ErrorDelModelo(str(error)) from error
+        raise _como_error_del_modelo(error) from error
