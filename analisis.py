@@ -68,9 +68,10 @@ async def analizar_resena(texto: str) -> dict:
                 input=texto,
                 # store=False: no guardamos nada del lado de Google.
                 store=False,
+                # El mime_type ya va dentro de response_format. NO pasar response_mime_type
+                # suelto: aunque la documentación del SDK dice que es obligatorio, la API
+                # estable lo rechaza con 400 ("only available in v1beta").
                 response_format=FORMATO_DE_RESPUESTA,
-                # Según la documentación del SDK, es obligatorio cuando se usa response_format.
-                response_mime_type="application/json",
                 # Sin tools: es una sola llamada de extracción.
             ),
             timeout=SEGUNDOS_MAXIMOS_DEL_MODELO,
