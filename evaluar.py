@@ -238,7 +238,7 @@ def si_no(valor: bool | None) -> str:
 
 COLUMNAS = [
     "caso", "pregunta", "herramienta_esperada", "herramientas_usadas", "herramienta_ok",
-    "cumple_criterio", "justificacion", "respuesta", "modelo",
+    "cumple_criterio", "justificacion", "respuesta", "modelo", "modelo_juez",
 ]
 
 
@@ -262,6 +262,8 @@ def guardar_resultado(resultados: list[Resultado], ahora: datetime) -> Path:
                 r.respuesta,
                 # Sin el modelo en el reporte, dos corridas no se pueden comparar entre sí.
                 GEMINI_MODELO,
+                # Ídem el juez: si cambia entre corridas, los criterios no son comparables.
+                GEMINI_MODELO_ANALISIS,
             ])
     return ruta
 
