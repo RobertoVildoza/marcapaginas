@@ -1,14 +1,21 @@
-"""Evaluación del bot: casos de prueba con respuesta esperada, sin Telegram.
+"""Evaluación del bot: casos de prueba con dos verificaciones, sin Telegram.
 
 Uso (desde la raíz del repositorio):
-    .venv\\Scripts\\python.exe evaluar.py                 # corre los ocho casos
+    .venv\\Scripts\\python.exe evaluar.py                 # corre todos los casos
     .venv\\Scripts\\python.exe evaluar.py rayuela dune    # corre solo esos casos
 
-Cada caso llama a gemini.responder() igual que lo hace el bot. Cuesta pedidos a Gemini
-(un caso con herramientas puede gastar dos o tres), y la cuota gratuita es de 20 por día
-por clave: conviene correr de a pocos casos.
+Los casos están en casos_prueba.json. Cada uno hace dos verificaciones:
+  1. herramienta_ok: con código, comprobamos qué herramienta invocó el modelo (o que no
+     invocó ninguna, si herramienta_esperada es null).
+  2. cumple_criterio: un segundo modelo, el juez, lee la pregunta, la respuesta y el criterio
+     en lenguaje natural y dice si se cumple. Comparar fragmentos de texto no alcanza: el
+     modelo nunca responde dos veces igual.
 
-Deja el resultado en docs/evaluacion/<fecha>.md para comparar corridas entre sí.
+Cuesta pedidos a Gemini: cada caso hace la llamada de la conversación (una a tres, con
+herramientas) más una del juez, y entre caso y caso hay una pausa para no chocar con la cuota
+por minuto. Conviene correr de a pocos casos.
+
+Deja el resultado en docs/evaluacion/<fecha>_<hhmm>.csv para comparar corridas entre sí.
 """
 
 import os
@@ -18,27 +25,29 @@ import os
 os.environ["RUTA_DB"] = "evaluacion.db"
 
 import asyncio
+import csv
+import json
 import logging
-import re
 import sys
-import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+
+from pydantic import BaseModel, Field
 
 import gemini
 import memoria
-from config import GEMINI_MODELO, GEMINI_MODELO_ANALISIS
+from config import GEMINI_MODELO, GEMINI_MODELO_ANALISIS, SEGUNDOS_MAXIMOS_DEL_MODELO, cliente
 
 ID_CHAT_PRUEBA = 999999999  # un chat que no existe en Telegram, solo para las pruebas
-CARPETA_RESULTADOS = Path("docs") / "evaluacion"
+RAIZ = Path(__file__).parent
+ARCHIVO_DE_CASOS = RAIZ / "casos_prueba.json"
+CARPETA_RESULTADOS = RAIZ / "docs" / "evaluacion"
 
-RESENA = (
-    "Leí La casa de los espíritus y me atrapó la saga familiar: los personajes femeninos "
-    "son inolvidables y la prosa es preciosa. Lo malo es que la segunda mitad se arrastra "
-    "y el final me pareció apurado. Igual lo recomiendo."
-)
+# Segundos de espera entre un caso y el siguiente, para no pasarse de la cuota por minuto.
+PAUSA_ENTRE_CASOS = 8
+
+logger = logging.getLogger("marcapaginas.evaluar")
 
 
 # --- Cómo sabemos qué herramientas invocó el modelo ---------------------------------------
@@ -59,85 +68,65 @@ class RegistroDeHerramientas(logging.Handler):
             self.invocadas.append(nombre)
 
 
-# --- Normalización y verificaciones --------------------------------------------------------
+# --- El juez -------------------------------------------------------------------------------
 
-def normalizar(texto: str) -> str:
-    """Minúsculas y sin tildes, para comparar 'Cortázar' con 'cortazar'."""
-    sin_tildes = unicodedata.normalize("NFD", texto)
-    sin_tildes = "".join(c for c in sin_tildes if not unicodedata.combining(c))
-    return sin_tildes.lower()
+class Juicio(BaseModel):
+    """Veredicto del juez sobre una respuesta."""
 
-
-FRASES_DE_NO_ENCONTRADO = [
-    "no encontr", "no encuentro", "no pude encontrar", "no aparece", "no figura",
-    "no hay ", "no existe", "no tengo registro", "no pude", "no logr", "no halle",
-    "no lo conozco", "no tengo", "no registra", "sin resultados",
-]
-ANIO = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
-# Dos o más palabras seguidas que empiezan con mayúscula: parece un nombre de persona.
-NOMBRE_PROPIO = re.compile(
-    r"\b[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+"
-)
-NOMBRES_PERMITIDOS = ["open library", "marcapaginas"]
+    cumple: bool = Field(description="True si la respuesta cumple el criterio indicado.")
+    justificacion: str = Field(
+        description="Una o dos frases que explican el veredicto, citando lo que dice la respuesta."
+    )
 
 
-def verificar_libro_inexistente(
-    mensaje: str, respuesta: str, invocadas: list[str]
-) -> tuple[list[str], list[str]]:
-    """Devuelve (fallas, advertencias). Solo las fallas deciden si el caso pasa.
+# Se le aclara que evalúe SOLO el criterio: sin eso, un juez penaliza respuestas correctas
+# pero escuetas (o con otro estilo) por motivos que el caso no pide verificar.
+PROMPT_JUEZ = """\
+Sos un evaluador estricto de un asistente sobre libros. Recibís una pregunta que le hicieron
+al asistente, la respuesta que dio y un criterio. Tu trabajo es decidir si la respuesta
+cumple el criterio.
 
-    Es el caso difícil: no hay un texto esperado, hay que comprobar que el bot NO inventó.
-    Usamos reglas simples y repetibles (no un segundo modelo, que gastaría cuota y sería
-    otra fuente de error). Las advertencias las revisa una persona con la respuesta completa
-    que queda en el archivo de resultados.
+Reglas:
+1. Evaluá SOLO el criterio indicado. No evalúes el estilo, el tono ni la extensión de la
+   respuesta: una respuesta breve que cumple el criterio cumple.
+2. Sé estricto con lo que el criterio exige: si pide un dato, tiene que estar en la respuesta;
+   si pide que no se invente algo, cualquier dato inventado es un incumplimiento.
+3. Basate únicamente en el texto de la respuesta, sin suponer lo que el asistente "quiso decir".
+4. En la justificación citá brevemente lo que dice la respuesta que justifica tu veredicto.
+"""
+
+FORMATO_DEL_JUEZ = {
+    "type": "text",
+    "mime_type": "application/json",
+    "schema": Juicio.model_json_schema(),
+}
+
+
+async def juzgar(pregunta: str, respuesta: str, criterio: str) -> Juicio:
+    """Le pide al juez que evalúe la respuesta contra el criterio. Levanta si algo falla.
+
+    Usa GEMINI_MODELO_ANALISIS: es una clasificación con esquema fijo, como el análisis de
+    reseñas, y no necesita el modelo grande. Va sin herramientas, con response_format.
+
+    El juez también se equivoca: por eso se guarda su justificación en el reporte, para que una
+    persona pueda revisar los veredictos dudosos en vez de tomarlos como verdad.
     """
-    fallas = []
-    advertencias = []
-    respuesta_normalizada = normalizar(respuesta)
-
-    # 1. Tiene que haber consultado la herramienta: si respondió sin buscar, no pudo saber.
-    if "buscar_libro" not in invocadas:
-        fallas.append("no consultó buscar_libro")
-
-    # 2. Tiene que decir que no lo encontró.
-    if not any(frase in respuesta_normalizada for frase in FRASES_DE_NO_ENCONTRADO):
-        fallas.append("no dice que no lo encontró")
-
-    # 3. No puede aparecer ningún año: el libro no existe, cualquier año es inventado.
-    anios = ANIO.findall(respuesta)
-    if anios:
-        fallas.append(f"menciona un año ({', '.join(anios)})")
-
-    # 4. Un nombre propio nuevo (el único autor de la conversación es el de la pregunta) es
-    #    solo una ADVERTENCIA, no una falla: la regla tiene falsos positivos conocidos
-    #    ("Hola Roberto" cuenta como nombre) y una prueba que falla por el motivo
-    #    equivocado se termina ignorando.
-    pregunta_normalizada = normalizar(mensaje)
-    inventados = [
-        nombre
-        for nombre in NOMBRE_PROPIO.findall(respuesta)
-        if normalizar(nombre) not in pregunta_normalizada
-        and normalizar(nombre) not in NOMBRES_PERMITIDOS
-    ]
-    if inventados:
-        advertencias.append(f"nombra a alguien que no estaba en la pregunta ({', '.join(inventados)})")
-
-    return fallas, advertencias
-
-
-def verificar_resena(mensaje: str, respuesta: str, invocadas: list[str]) -> tuple[list[str], list[str]]:
-    """La respuesta tiene que mencionar el sentimiento que detectó el análisis.
-
-    Invocar la herramienta no alcanza: el 10/11 este caso pasó en verde mientras el análisis
-    fallaba por un 503 y el bot contestaba "tuve un problemita técnico". Una prueba que pasa
-    cuando la función falló da confianza falsa; exigir el sentimiento (que solo existe si el
-    análisis salió bien) hace que ese fallo se vea. Aceptamos "mixto" además de "mixta" porque
-    el modelo lo dice así a veces y no es un fallo del análisis.
-    """
-    respuesta_normalizada = normalizar(respuesta)
-    if not any(palabra in respuesta_normalizada for palabra in ("favorable", "desfavorable", "mixta", "mixto")):
-        return ["no menciona el sentimiento (favorable, desfavorable o mixta): ¿falló el análisis?"], []
-    return [], []
+    pedido = (
+        f"PREGUNTA:\n{pregunta}\n\n"
+        f"RESPUESTA DEL ASISTENTE:\n{respuesta}\n\n"
+        f"CRITERIO A VERIFICAR:\n{criterio}"
+    )
+    interaccion = await asyncio.wait_for(
+        cliente.aio.interactions.create(
+            model=GEMINI_MODELO_ANALISIS,
+            system_instruction=PROMPT_JUEZ,
+            input=pedido,
+            store=False,
+            response_format=FORMATO_DEL_JUEZ,
+        ),
+        timeout=SEGUNDOS_MAXIMOS_DEL_MODELO,
+    )
+    return Juicio.model_validate_json(interaccion.output_text)
 
 
 # --- Casos ---------------------------------------------------------------------------------
@@ -145,43 +134,16 @@ def verificar_resena(mensaje: str, respuesta: str, invocadas: list[str]) -> tupl
 @dataclass
 class Caso:
     nombre: str
-    mensaje: str
-    fragmentos: list[str] = field(default_factory=list)  # deben aparecer en la respuesta
-    herramienta: str | None = None                       # debe haberse invocado
-    verificacion: Callable[[str, str, list[str]], tuple[list[str], list[str]]] | None = None
-    descripcion_de_verificacion: str = ""                # cómo se muestra en la columna "esperado"
-
-    def esperado(self) -> str:
-        partes = []
-        if self.herramienta:
-            partes.append(f"herramienta {self.herramienta}")
-        if self.fragmentos:
-            partes.append("texto: " + ", ".join(self.fragmentos))
-        if self.verificacion:
-            partes.append(self.descripcion_de_verificacion)
-        return "; ".join(partes)
+    pregunta: str
+    herramienta_esperada: str | None  # None: no debería usar ninguna
+    criterio: str
 
 
-CASOS = [
-    Caso("rayuela", "¿Quién escribió Rayuela y en qué año salió?",
-         fragmentos=["Cortázar", "1963"], herramienta="buscar_libro"),
-    Caso("dune", "Contame de Dune",
-         fragmentos=["Herbert", "1965"], herramienta="buscar_libro"),
-    Caso("recomendacion_scifi", "Recomendame ciencia ficción",
-         herramienta="recomendar_por_tema"),
-    Caso("recomendacion_terror", "Recomendame terror",
-         herramienta="recomendar_por_tema"),
-    Caso("resena", f'Mirá esta reseña de un libro: "{RESENA}" ¿Qué dice?',
-         herramienta="analizar_resena", verificacion=verificar_resena,
-         descripcion_de_verificacion="menciona el sentimiento (favorable, desfavorable o mixta)"),
-    Caso("guardar", "Guardá Dune en mi lista",
-         herramienta="guardar_en_lista"),
-    Caso("ver_lista", "¿Qué tengo en mi lista?",
-         herramienta="ver_lista"),
-    Caso("libro_inexistente", "Contame del libro Zzzqq de Mariana Quintil",
-         verificacion=verificar_libro_inexistente,
-         descripcion_de_verificacion="dice que no lo encontró, sin año inventado"),
-]
+def cargar_casos() -> list[Caso]:
+    datos = json.loads(ARCHIVO_DE_CASOS.read_text(encoding="utf-8"))
+    return [
+        Caso(d["nombre"], d["pregunta"], d["herramienta_esperada"], d["criterio"]) for d in datos
+    ]
 
 
 # --- Ejecución -----------------------------------------------------------------------------
@@ -189,124 +151,145 @@ CASOS = [
 @dataclass
 class Resultado:
     caso: Caso
-    estado: str          # "OK", "FALLA" o "ERROR" (el modelo no pudo responder)
-    fallas: list[str]
     invocadas: list[str]
     respuesta: str
-    advertencias: list[str] = field(default_factory=list)  # se informan, no cambian el veredicto
+    # None en herramienta_ok y cumple_criterio significa ERROR: no se pudo verificar (falló el
+    # modelo o el juez). No es lo mismo que False, que es una falla real del bot.
+    herramienta_ok: bool | None
+    cumple_criterio: bool | None
+    justificacion: str  # la del juez, o el motivo del error
 
-    def obtenido(self) -> str:
-        herramientas = ", ".join(self.invocadas) or "ninguna"
-        if self.estado == "ERROR":
-            return f"herramientas: {herramientas}; el modelo no respondió"
-        return f"herramientas: {herramientas}; respuesta: {' '.join(self.respuesta.split())}"
+
+def herramienta_correcta(esperada: str | None, invocadas: list[str]) -> bool:
+    """Con esperada=None, correcto es no haber usado ninguna herramienta."""
+    return not invocadas if esperada is None else esperada in invocadas
 
 
 async def correr_caso(caso: Caso) -> Resultado:
-    """Corre un caso con el historial vacío y devuelve su resultado."""
+    """Corre un caso con el historial vacío y lo verifica de las dos maneras."""
     memoria.borrar_historial(ID_CHAT_PRUEBA)  # que un caso no contamine al siguiente
     registro = RegistroDeHerramientas()
     logger_herramientas = logging.getLogger("marcapaginas.herramientas")
     logger_herramientas.addHandler(registro)
     try:
-        respuesta = await gemini.responder(ID_CHAT_PRUEBA, caso.mensaje)
+        respuesta = await gemini.responder(ID_CHAT_PRUEBA, caso.pregunta)
     except gemini.ErrorDelModelo as error:
-        return Resultado(caso, "ERROR", [str(error)], registro.invocadas, "")
+        return Resultado(
+            caso, registro.invocadas, "", None, None, f"El modelo no respondió: {error}"
+        )
     finally:
         logger_herramientas.removeHandler(registro)
 
-    fallas = []
-    advertencias = []
-    if caso.herramienta and caso.herramienta not in registro.invocadas:
-        fallas.append(f"no invocó {caso.herramienta}")
-    respuesta_normalizada = normalizar(respuesta)
-    for fragmento in caso.fragmentos:
-        if normalizar(fragmento) not in respuesta_normalizada:
-            fallas.append(f"falta '{fragmento}' en la respuesta")
-    if caso.verificacion:
-        fallas_propias, advertencias = caso.verificacion(caso.mensaje, respuesta, registro.invocadas)
-        fallas += fallas_propias
-
+    herramienta_ok = herramienta_correcta(caso.herramienta_esperada, registro.invocadas)
+    try:
+        juicio = await juzgar(caso.pregunta, respuesta, caso.criterio)
+    except Exception as error:
+        logger.error("Falló el juez en el caso %s", caso.nombre, exc_info=True)
+        return Resultado(
+            caso, registro.invocadas, respuesta, herramienta_ok, None,
+            f"El juez no pudo evaluar: {error}",
+        )
     return Resultado(
-        caso, "FALLA" if fallas else "OK", fallas, registro.invocadas, respuesta, advertencias
+        caso, registro.invocadas, respuesta, herramienta_ok, juicio.cumple, juicio.justificacion
     )
 
 
-def recortar(texto: str, largo: int) -> str:
-    return texto if len(texto) <= largo else texto[: largo - 1] + "…"
+# --- Salida --------------------------------------------------------------------------------
+
+def marca(valor: bool | None) -> str:
+    return "?" if valor is None else ("✓" if valor else "✗")
 
 
-def imprimir_tabla(resultados: list[Resultado]) -> None:
+def imprimir_resultado(resultado: Resultado) -> None:
+    """Una línea por caso: marca de herramienta, marca de criterio y la pregunta."""
+    print(
+        f"  herramienta {marca(resultado.herramienta_ok)}   "
+        f"criterio {marca(resultado.cumple_criterio)}   "
+        f"{resultado.caso.nombre}: {resultado.caso.pregunta}"
+    )
+    if resultado.cumple_criterio is not True:  # falla (False) o error (None): se explica
+        print(f"      juez: {resultado.justificacion}")
+    if resultado.herramienta_ok is False:
+        esperada = resultado.caso.herramienta_esperada or "ninguna"
+        usadas = ", ".join(resultado.invocadas) or "ninguna"
+        print(f"      herramienta: se esperaba {esperada}, usó {usadas}")
+
+
+def porcentaje(aciertos: int, total: int) -> str:
+    return f"{aciertos}/{total} ({round(100 * aciertos / total)}%)" if total else "0/0"
+
+
+def imprimir_resumen(resultados: list[Resultado]) -> None:
+    total = len(resultados)
     print()
-    print(f"{'caso':<22}{'resultado':<11}{'esperado':<45}obtenido")
-    print("-" * 140)
-    for r in resultados:
-        print(f"{r.caso.nombre:<22}{r.estado:<11}{recortar(r.caso.esperado(), 43):<45}"
-              f"{recortar(r.obtenido(), 80)}")
-        for falla in r.fallas:
-            print(f"{'':<22}  -> {falla}")
-        for advertencia in r.advertencias:
-            print(f"{'':<22}  ADVERTENCIA: {advertencia}")
+    print(f"Herramienta correcta: {porcentaje(sum(r.herramienta_ok is True for r in resultados), total)}")
+    print(f"Criterio cumplido:    {porcentaje(sum(r.cumple_criterio is True for r in resultados), total)}")
+    sin_verificar = sum(r.herramienta_ok is None or r.cumple_criterio is None for r in resultados)
+    if sin_verificar:
+        print(
+            f"({sin_verificar} caso(s) con ERROR, marcados con ?: no cuentan como aciertos pero "
+            "tampoco son fallas del bot; conviene repetirlos)"
+        )
 
 
-def puntaje(resultados: list[Resultado]) -> str:
-    return f"{sum(r.estado == 'OK' for r in resultados)}/{len(resultados)}"
+def si_no(valor: bool | None) -> str:
+    return "ERROR" if valor is None else ("sí" if valor else "no")
 
 
-def celda(texto: str) -> str:
-    """Escapa un texto para ponerlo en una celda de tabla Markdown."""
-    return " ".join(texto.split()).replace("|", "\\|")
+COLUMNAS = [
+    "caso", "pregunta", "herramienta_esperada", "herramientas_usadas", "herramienta_ok",
+    "cumple_criterio", "justificacion", "respuesta", "modelo",
+]
 
 
 def guardar_resultado(resultados: list[Resultado], ahora: datetime) -> Path:
     CARPETA_RESULTADOS.mkdir(parents=True, exist_ok=True)
     # Con hora y minutos para que dos corridas del mismo día no se pisen.
-    ruta = CARPETA_RESULTADOS / f"{ahora:%Y-%m-%d_%H%M}.md"
-    lineas = [
-        f"# Evaluación del {ahora:%d/%m/%Y %H:%M}",
-        "",
-        f"- Modelo de conversación: `{GEMINI_MODELO}`",
-        f"- Modelo de análisis: `{GEMINI_MODELO_ANALISIS}`",
-        f"- Casos corridos: {', '.join(r.caso.nombre for r in resultados)}",
-        f"- **Puntaje: {puntaje(resultados)}**",
-        "",
-        "| Caso | Resultado | Esperado | Obtenido |",
-        "|---|---|---|---|",
-    ]
-    for r in resultados:
-        obtenido = r.obtenido()
-        if r.fallas:
-            obtenido += " — FALLAS: " + "; ".join(r.fallas)
-        if r.advertencias:
-            obtenido += " — ADVERTENCIAS: " + "; ".join(r.advertencias)
-        lineas.append(f"| {r.caso.nombre} | {r.estado} | {celda(r.caso.esperado())} | {celda(obtenido)} |")
-    lineas += ["", "## Respuestas completas", ""]
-    for r in resultados:
-        lineas += [f"### {r.caso.nombre}", "", f"Mensaje: {r.caso.mensaje}", "",
-                   r.respuesta or "(sin respuesta)", ""]
-    ruta.write_text("\n".join(lineas), encoding="utf-8")
+    ruta = CARPETA_RESULTADOS / f"{ahora:%Y-%m-%d_%H%M}.csv"
+    # utf-8-sig: el BOM hace que Excel muestre bien las tildes.
+    with ruta.open("w", encoding="utf-8-sig", newline="") as archivo:
+        escritor = csv.writer(archivo)
+        escritor.writerow(COLUMNAS)
+        for r in resultados:
+            escritor.writerow([
+                r.caso.nombre,
+                r.caso.pregunta,
+                r.caso.herramienta_esperada or "ninguna",
+                ", ".join(r.invocadas) or "ninguna",
+                si_no(r.herramienta_ok),
+                si_no(r.cumple_criterio),
+                r.justificacion,
+                r.respuesta,
+                # Sin el modelo en el reporte, dos corridas no se pueden comparar entre sí.
+                GEMINI_MODELO,
+            ])
     return ruta
 
 
 async def main() -> None:
+    todos = cargar_casos()
     nombres_pedidos = sys.argv[1:]
-    por_nombre = {caso.nombre: caso for caso in CASOS}
+    por_nombre = {caso.nombre: caso for caso in todos}
     desconocidos = [n for n in nombres_pedidos if n not in por_nombre]
     if desconocidos:
         raise SystemExit(
             f"No existe el caso: {', '.join(desconocidos)}. Casos disponibles: {', '.join(por_nombre)}"
         )
-    casos = [por_nombre[n] for n in nombres_pedidos] or CASOS
+    casos = [por_nombre[n] for n in nombres_pedidos] or todos
 
     memoria.inicializar()
+    print(f"Modelo: {GEMINI_MODELO} | juez: {GEMINI_MODELO_ANALISIS} | casos: {len(casos)}")
     resultados = []
-    for caso in casos:
-        print(f"Corriendo {caso.nombre}...", flush=True)
-        resultados.append(await correr_caso(caso))
+    for numero, caso in enumerate(casos, start=1):
+        if numero > 1:
+            await asyncio.sleep(PAUSA_ENTRE_CASOS)
+        print(f"[{numero}/{len(casos)}] Corriendo {caso.nombre}...", flush=True)
+        resultado = await correr_caso(caso)
+        resultados.append(resultado)
+        imprimir_resultado(resultado)
 
-    imprimir_tabla(resultados)
-    print(f"\nPuntaje: {puntaje(resultados)}")
-    print(f"Guardado en {guardar_resultado(resultados, datetime.now())}")
+    imprimir_resumen(resultados)
+    print(f"\nGuardado en {guardar_resultado(resultados, datetime.now())}")
 
 
 if __name__ == "__main__":

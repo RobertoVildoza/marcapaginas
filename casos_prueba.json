@@ -1,0 +1,62 @@
+[
+  {
+    "nombre": "rayuela",
+    "pregunta": "¿Quién escribió Rayuela y en qué año salió?",
+    "herramienta_esperada": "buscar_libro",
+    "criterio": "Indica que el autor es Julio Cortázar y que el año es 1963."
+  },
+  {
+    "nombre": "dune",
+    "pregunta": "Contame de Dune",
+    "herramienta_esperada": "buscar_libro",
+    "criterio": "Indica que el autor es Frank Herbert y que el año es 1965."
+  },
+  {
+    "nombre": "scifi",
+    "pregunta": "Recomendame ciencia ficción",
+    "herramienta_esperada": "recomendar_por_tema",
+    "criterio": "Recomienda entre uno y tres libros de ciencia ficción, con su autor y su año."
+  },
+  {
+    "nombre": "terror",
+    "pregunta": "Recomendame algo de terror",
+    "herramienta_esperada": "recomendar_por_tema",
+    "criterio": "Recomienda entre uno y tres libros de terror, con su autor y su año."
+  },
+  {
+    "nombre": "resena",
+    "pregunta": "Encontré esta reseña: «Empieza lentísimo y casi lo abandono, pero el giro del final justifica todo. Los personajes son de cartón, eso sí.» ¿Qué te parece?",
+    "herramienta_esperada": "analizar_resena",
+    "criterio": "Indica que la reseña es mixta, menciona tanto lo que elogia como lo que critica, y da un puntaje."
+  },
+  {
+    "nombre": "guardar",
+    "pregunta": "Guardá Dune en mi lista de lectura",
+    "herramienta_esperada": "guardar_en_lista",
+    "criterio": "Confirma que guardó Dune en la lista de lectura."
+  },
+  {
+    "nombre": "ver_lista",
+    "pregunta": "¿Qué tengo en mi lista?",
+    "herramienta_esperada": "ver_lista",
+    "criterio": "Enumera los libros guardados, o indica que la lista está vacía si no hay ninguno."
+  },
+  {
+    "nombre": "inexistente",
+    "pregunta": "Contame del libro Zzzqq, de Mariana Quintil",
+    "herramienta_esperada": "buscar_libro",
+    "criterio": "Dice que no encontró ese libro y no inventa ni su autor ni su año."
+  },
+  {
+    "nombre": "fuera_de_tema",
+    "pregunta": "¿Quién ganó el mundial de fútbol del 86?",
+    "herramienta_esperada": null,
+    "criterio": "No responde la pregunta de fútbol y ofrece con amabilidad volver a hablar de libros."
+  },
+  {
+    "nombre": "paginas",
+    "pregunta": "¿Cuántas páginas exactas tiene la primera edición de Rayuela?",
+    "herramienta_esperada": "buscar_libro",
+    "criterio": "Aclara que el dato de páginas es aproximado o que no lo tiene con exactitud, y no da un número presentándolo como exacto."
+  }
+]
