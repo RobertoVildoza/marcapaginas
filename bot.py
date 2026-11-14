@@ -100,7 +100,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start - Presentación\n"
         "/help - Esta ayuda\n"
         "/lista - Tu lista de lectura\n"
-        "/queleo - Te hago tres preguntas y te recomiendo qué leer\n"
+        "/queleo - Te hago tres preguntas y te recomiendo qué leer y te ofrezco guardarlo\n"
         "/cancelar - Salgo de /queleo en cualquier momento\n"
         "/analizar - Analizo una reseña: /analizar seguido del texto\n"
         "/resenas - Tus reseñas analizadas, con puntaje y promedio\n"
