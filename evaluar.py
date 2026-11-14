@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 import gemini
 import memoria
 from config import (
-    GEMINI_MODELO, GEMINI_MODELO_ANALISIS, RUTA_DB, SEGUNDOS_MAXIMOS_DEL_MODELO, cliente,
+    GEMINI_MODELO, GEMINI_MODELO_ANALISIS, RUTA_DB, cliente,
 )
 
 ID_CHAT_PRUEBA = 999999999  # un chat que no existe en Telegram, solo para las pruebas
@@ -51,10 +51,16 @@ CARPETA_RESULTADOS = RAIZ / "docs" / "evaluacion"
 # Pausas para no pasarse de la cuota por minuto. Cada caso dispara dos o tres pedidos seguidos
 # (la conversación, con sus vueltas de herramientas, y el juez): la ráfaga es lo que pega contra
 # el límite. Si igual se pasa, el SDK reintenta el 429 con backoff por dentro y nuestro
-# asyncio.wait_for (SEGUNDOS_MAXIMOS_DEL_MODELO) lo corta antes de que termine: llega como
-# TimeoutError, no como 429. Por eso se evita llegar al límite en vez de atrapar el error.
+# asyncio.wait_for lo corta antes de que termine: llega como TimeoutError, no como 429.
+# Por eso se evita llegar al límite en vez de atrapar el error (y ver SEGUNDOS_DEL_JUEZ).
 PAUSA_ENTRE_CASOS = 20
 PAUSA_ANTES_DEL_JUEZ = 3
+
+# Tope de espera por pedido al juez. Tiene que ser MAYOR que el tope total de reintentos del
+# SDK (30 s en _gaos, con backoff y Retry-After): con 30 el wait_for cortaba justo cuando el
+# backoff todavía esperaba y un 429 nunca llegaba a recuperarse. El bot usa
+# SEGUNDOS_MAXIMOS_DEL_MODELO (30) a propósito: ahí hay un usuario de Telegram esperando.
+SEGUNDOS_DEL_JUEZ = 40
 
 # Tablas de memoria.py que guardan estado por chat_id.
 TABLAS_CON_ESTADO = ["mensajes", "lista_lectura", "flujo_activo", "resenas"]
@@ -136,7 +142,7 @@ async def juzgar(pregunta: str, respuesta: str, criterio: str) -> Juicio:
             store=False,
             response_format=FORMATO_DEL_JUEZ,
         ),
-        timeout=SEGUNDOS_MAXIMOS_DEL_MODELO,
+        timeout=SEGUNDOS_DEL_JUEZ,
     )
     return Juicio.model_validate_json(interaccion.output_text)
 
