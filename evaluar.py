@@ -3,6 +3,7 @@
 Uso (desde la raíz del repositorio):
     .venv\\Scripts\\python.exe evaluar.py                 # corre todos los casos
     .venv\\Scripts\\python.exe evaluar.py rayuela dune    # corre solo esos casos
+    .venv\\Scripts\\python.exe evaluar.py --pausa 4       # pausa de 4 s entre casos (por omisión 20)
 
 Los casos están en casos_prueba.json. Cada uno hace dos verificaciones:
   1. herramienta_ok: con código, comprobamos qué herramienta invocó el modelo (o que no
@@ -53,7 +54,7 @@ CARPETA_RESULTADOS = RAIZ / "docs" / "evaluacion"
 # el límite. Si igual se pasa, el SDK reintenta el 429 con backoff por dentro y nuestro
 # asyncio.wait_for lo corta antes de que termine: llega como TimeoutError, no como 429.
 # Por eso se evita llegar al límite en vez de atrapar el error (y ver SEGUNDOS_DEL_JUEZ).
-PAUSA_ENTRE_CASOS = 20
+PAUSA_ENTRE_CASOS = 20  # valor por omisión; se cambia con --pausa SEGUNDOS
 PAUSA_ANTES_DEL_JUEZ = 3
 
 # Tope de espera por pedido al juez. Tiene que ser MAYOR que el tope total de reintentos del
@@ -307,9 +308,35 @@ def guardar_resultado(resultados: list[Resultado], ahora: datetime) -> Path:
     return ruta
 
 
+def leer_argumentos(argumentos: list[str]) -> tuple[list[str], float]:
+    """Separa los nombres de casos de la opción --pausa SEGUNDOS (o --pausa=SEGUNDOS).
+
+    Devuelve (nombres, pausa). Sin la opción, la pausa es PAUSA_ENTRE_CASOS.
+    """
+    nombres, pausa, i = [], PAUSA_ENTRE_CASOS, 0
+    while i < len(argumentos):
+        argumento = argumentos[i]
+        if argumento == "--pausa" or argumento.startswith("--pausa="):
+            if "=" in argumento:
+                valor = argumento.split("=", 1)[1]
+            else:
+                i += 1
+                valor = argumentos[i] if i < len(argumentos) else ""
+            try:
+                pausa = float(valor)
+                if pausa < 0:
+                    raise ValueError
+            except ValueError:
+                raise SystemExit(f"--pausa necesita un número de segundos (0 o más), no {valor!r}")
+        else:
+            nombres.append(argumento)
+        i += 1
+    return nombres, pausa
+
+
 async def main() -> None:
     todos = cargar_casos()
-    nombres_pedidos = sys.argv[1:]
+    nombres_pedidos, pausa = leer_argumentos(sys.argv[1:])
     por_nombre = {caso.nombre: caso for caso in todos}
     desconocidos = [n for n in nombres_pedidos if n not in por_nombre]
     if desconocidos:
@@ -324,7 +351,7 @@ async def main() -> None:
     resultados = []
     for numero, caso in enumerate(casos, start=1):
         if numero > 1:
-            await asyncio.sleep(PAUSA_ENTRE_CASOS)
+            await asyncio.sleep(pausa)
         print(f"[{numero}/{len(casos)}] Corriendo {caso.nombre}...", flush=True)
         resultado = await correr_caso(caso)
         resultados.append(resultado)
