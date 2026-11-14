@@ -1,0 +1,8 @@
+﻿caso,pregunta,herramienta_esperada,herramientas_usadas,herramienta_ok,cumple_criterio,justificacion,respuesta,modelo,modelo_juez
+rayuela,¿Quién escribió Rayuela y en qué año salió?,buscar_libro,buscar_libro,sí,sí,La respuesta indica correctamente que fue escrito por Julio Cortazar y se publico en 1963 al mencionar 'fue escrito por Julio Cortazar y se publico en 1963'.,Rayuela fue escrito por Julio Cortázar y se publicó en 1963. Tiene unas 633 páginas. ¿Querés que te lo guarde en tu lista de lectura?,gemini-3.5-flash-lite,gemini-3.5-flash-lite
+dune,Contame de Dune,buscar_libro,buscar_libro,sí,sí,La respuesta indica correctamente que 'escrita por Frank Herbert y publicada en 1965'.,"Dune es una novela de ciencia ficción escrita por Frank Herbert y publicada en 1965. Tiene unas 608 páginas. La historia se centra en el planeta Arrakis y en Paul Atreides, en medio de intrigas políticas y recursos valiosos.
+
+¿Querés que te guarde Dune en tu lista de lectura?",gemini-3.5-flash-lite,gemini-3.5-flash-lite
+resena,"Encontré esta reseña: «Empieza lentísimo y casi lo abandono, pero el giro del final justifica todo. Los personajes son de cartón, eso sí.» ¿Qué te parece?",analizar_resena,analizar_resena,sí,sí,"La respuesta indica que 'es una reseña mixta', menciona lo que critica («empieza muy lento y que los personajes son flojos»), lo que elogia («el giro del final vale la pena») y da un puntaje («un puntaje de 3 sobre 5»).","Fíjate que es una reseña mixta, con un puntaje de 3 sobre 5. A quien la escribió le pareció que empieza muy lento y que los personajes son flojos, pero destaca que el giro del final vale la pena. 
+
+¿Te gustó la idea o querés que busquemos algo por el estilo?",gemini-3.5-flash-lite,gemini-3.5-flash-lite
