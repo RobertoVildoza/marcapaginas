@@ -10,6 +10,7 @@ se lee en nuestro código y no adentro de la librería.
 """
 
 import logging
+import re
 import unicodedata
 from typing import NamedTuple
 
@@ -36,7 +37,7 @@ DESCRIPCION_DE_EXTENSION = {
 LIBROS_A_PEDIR = 10
 
 # --- La máquina de estados ----------------------------------------------------------------
-GENERO, EXTENSION, ANIMO = "genero", "extension", "animo"
+GENERO, EXTENSION, ANIMO, CONFIRMACION = "genero", "extension", "animo", "confirmacion"
 
 # Cada paso: qué pregunta el bot cuando se entra a él.
 PREGUNTAS = {
@@ -44,11 +45,19 @@ PREGUNTAS = {
     EXTENSION: "¿Qué extensión preferís: corta, mediana o larga?",
     ANIMO: "Última: ¿cómo andás de ánimo? Contame en una frase, por ejemplo "
            "\"cansado\" o \"con ganas de reírme\".",
+    CONFIRMACION: "¿Querés guardar alguno en tu lista de lectura? Respondé con el número, "
+                  "o decime que no.",
 }
 
-# Cada paso: a cuál se pasa cuando la respuesta es válida. ANIMO es el último (None):
-# al responderlo se hace la recomendación y el flujo termina.
-SIGUIENTE_PASO = {GENERO: EXTENSION, EXTENSION: ANIMO, ANIMO: None}
+# Cada paso: a cuál se pasa cuando la respuesta es válida. Al responder ANIMO se hace la
+# recomendación y se pasa a CONFIRMACION, que es el último (None): al responderlo, el flujo termina.
+SIGUIENTE_PASO = {GENERO: EXTENSION, EXTENSION: ANIMO, ANIMO: CONFIRMACION, CONFIRMACION: None}
+
+# Respuestas que en CONFIRMACION significan "no quiero guardar ninguno".
+PALABRAS_DE_RECHAZO = {"no", "nop", "nope", "ninguno", "ninguna", "nada", "gracias"}
+NUMEROS_EN_PALABRAS = {
+    "uno": 1, "primero": 1, "primera": 1, "dos": 2, "segundo": 2, "segunda": 2,
+}
 
 # Qué hay en la base para un chat: nada, un flujo en curso, o uno que ya venció.
 NINGUNO, ACTIVO, VENCIDO = "ninguno", "activo", "vencido"
@@ -159,9 +168,65 @@ async def avanzar(chat_id: int, texto: str) -> RespuestaDelFlujo:
             return RespuestaDelFlujo("No te entendí. Elegí una: corta, mediana o larga.")
         return _guardar_y_pasar_al_siguiente(chat_id, EXTENSION, extension)
 
-    # paso == ANIMO, el último: guardamos el dato y recomendamos.
+    if paso == CONFIRMACION:
+        return _confirmar(chat_id, texto, flujo["candidatos"])
+
+    # paso == ANIMO: guardamos el dato y recomendamos (queda en CONFIRMACION).
     memoria.guardar_dato_de_flujo(chat_id, ANIMO, texto, ANIMO)
     return await _recomendar(chat_id, flujo["genero"], flujo["extension"], texto)
+
+
+def _interpretar_numero(texto: str) -> int | None:
+    """Devuelve el número que eligió ("2", "el 2", "número 2", "segundo"), o None si no hay."""
+    limpio = _normalizar(texto)
+    coincidencia = re.fullmatch(r"(?:el |la |numero |opcion |#)?\s*(\d+)\W*", limpio)
+    if coincidencia:
+        return int(coincidencia.group(1))
+    return NUMEROS_EN_PALABRAS.get(limpio.strip(" .!"))
+
+
+def _es_rechazo(texto: str) -> bool:
+    """True si dice que no quiere guardar ninguno ("no", "ninguno", "no, gracias"...)."""
+    palabras = re.findall(r"\w+", _normalizar(texto))
+    return bool(palabras) and palabras[0] in PALABRAS_DE_RECHAZO and not any(
+        p.isdigit() for p in palabras
+    )
+
+
+def _confirmar(chat_id: int, texto: str, candidatos: list[dict] | None) -> RespuestaDelFlujo:
+    """Paso CONFIRMACION: guarda el libro elegido, cierra si dice que no, o repite la pregunta."""
+    if not candidatos:
+        # No debería pasar (se guardan al entrar al paso); si pasa, no dejamos al chat trabado.
+        memoria.borrar_flujo(chat_id)
+        logger.error("Flujo en confirmación sin candidatos (chat %s)", chat_id)
+        return RespuestaDelFlujo("Se me perdieron los libros que te ofrecí. Probá de nuevo con /queleo.")
+
+    numero = _interpretar_numero(texto)
+    if numero is not None and 1 <= numero <= len(candidatos):
+        libro = candidatos[numero - 1]
+        agregado = memoria.agregar_a_lista(
+            chat_id, libro["titulo"], libro["autor"] or "autor desconocido", libro["anio"] or 0
+        )
+        memoria.borrar_flujo(chat_id)
+        logger.info("Flujo terminado con libro guardado (chat %s)", chat_id)
+        respuesta = (
+            f"Listo, guardé \"{libro['titulo']}\" en tu lista de lectura. Podés verla con /lista."
+            if agregado
+            else f"\"{libro['titulo']}\" ya estaba en tu lista de lectura. Podés verla con /lista."
+        )
+        return RespuestaDelFlujo(respuesta, intercambio=(texto, respuesta))
+
+    if _es_rechazo(texto):
+        memoria.borrar_flujo(chat_id)
+        logger.info("Flujo terminado sin guardar (chat %s)", chat_id)
+        respuesta = "Está bien, no guardo nada. Cuando quieras otra recomendación, /queleo."
+        return RespuestaDelFlujo(respuesta, intercambio=(texto, respuesta))
+
+    # Cualquier otra cosa (incluido un número fuera de rango): repetimos sin avanzar.
+    return RespuestaDelFlujo(
+        f"No te entendí. Respondé con un número del 1 al {len(candidatos)}, decime que no, "
+        "o salí con /cancelar."
+    )
 
 
 def _guardar_y_pasar_al_siguiente(chat_id: int, paso: str, valor: str) -> RespuestaDelFlujo:
@@ -192,14 +257,41 @@ async def _recomendar(chat_id: int, genero: str, extension: str, animo: str) -> 
         {**libro, "extension": clasificar_extension(libro["paginas"])}
         for libro in resultado["libros"]
     ]
-    texto = await gemini.recomendar_con_preferencias(
+    recomendacion = await gemini.recomendar_con_preferencias(
         genero, extension, animo, libros, DESCRIPCION_DE_EXTENSION[extension]
     )
 
-    memoria.borrar_flujo(chat_id)
-    logger.info("Flujo terminado con recomendación (chat %s)", chat_id)
+    # Los datos de cada libro salen de nuestra lista, no del modelo: él solo dio el número.
+    elegidos = [libros[eleccion.numero - 1] for eleccion in recomendacion.elegidos]
+    texto = armar_mensaje(recomendacion, elegidos)
+    candidatos = [
+        {k: libro[k] for k in ("titulo", "autor", "anio", "paginas")} for libro in elegidos
+    ]
+    memoria.pasar_a_confirmacion(chat_id, candidatos)
+    logger.info("Recomendación hecha, esperando confirmación (chat %s)", chat_id)
     pedido = (
         "Quiero que me recomiendes algo para leer. "
         f"Género: {genero}. Extensión: {extension}. Ánimo: {animo}."
     )
     return RespuestaDelFlujo(texto, intercambio=(pedido, texto))
+
+
+def armar_mensaje(recomendacion: gemini.Recomendacion, elegidos: list[dict]) -> str:
+    """Arma el mensaje: introducción, libros numerados con sus datos y el porqué, y la pregunta.
+
+    `elegidos` son los libros (de la lista del código) en el mismo orden que
+    recomendacion.elegidos; los números del mensaje son los que la persona va a responder.
+    """
+    renglones = []
+    for n, (libro, eleccion) in enumerate(zip(elegidos, recomendacion.elegidos), start=1):
+        anio = f" ({libro['anio']})" if libro["anio"] else ""
+        # "unas": las páginas son la mediana entre ediciones, una aproximación.
+        paginas = f"unas {libro['paginas']} páginas" if libro["paginas"] else "sin dato de páginas"
+        renglones.append(
+            f"{n}. {libro['titulo']} - {libro['autor'] or 'autor desconocido'}{anio}, {paginas}\n"
+            f"   {eleccion.porque.strip()}"
+        )
+    return (
+        f"{recomendacion.introduccion.strip()}\n\n" + "\n\n".join(renglones)
+        + f"\n\n{PREGUNTAS[CONFIRMACION]}"
+    )

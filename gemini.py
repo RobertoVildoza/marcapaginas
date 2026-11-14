@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 
+from pydantic import BaseModel, Field
+
 import herramientas
 import memoria
 from config import GEMINI_MODELO, SEGUNDOS_MAXIMOS_DEL_MODELO, cliente
@@ -178,15 +180,70 @@ def _renglon_de_libro(numero: int, libro: dict) -> str:
     return f"{numero}. {libro['titulo']} - {libro.get('autor') or 'autor desconocido'}, {anio}, {dato_de_paginas}"
 
 
+# Cuántos libros como máximo se le ofrecen a la persona, aunque el modelo devuelva más.
+MAXIMO_DE_ELEGIDOS = 2
+
+
+class EleccionDeLibro(BaseModel):
+    """Un libro elegido de la lista, con el motivo."""
+
+    # Se devuelve el NÚMERO y no los datos del libro: el título, el autor, el año y las
+    # páginas los toma el código de la lista que armó él mismo. Así el modelo no puede alterar
+    # ni inventar un dato que ya tenemos, igual que con el chat_id de las herramientas.
+    numero: int = Field(
+        description="Posición del libro elegido en la lista recibida, empezando en 1."
+    )
+    porque: str = Field(
+        description="Una o dos frases que explican por qué encaja con lo que pidió la persona."
+    )
+
+
+class Recomendacion(BaseModel):
+    """Recomendación del flujo guiado: una introducción y uno o dos libros elegidos."""
+
+    introduccion: str = Field(description="Una línea de introducción, en el tono de Marcapáginas.")
+    elegidos: list[EleccionDeLibro] = Field(
+        description="Uno o dos libros elegidos de la lista recibida."
+    )
+
+
+def _sin_referencias(esquema: dict) -> dict:
+    """Devuelve el esquema con los $ref reemplazados por la definición que nombran.
+
+    pydantic saca las clases anidadas a $defs y las cita con $ref; el esquema que mandamos al
+    modelo tiene que ser autocontenido y simple (ver analisis.py), así que lo aplanamos acá.
+    """
+    definiciones = esquema.get("$defs", {})
+
+    def resolver(nodo):
+        if isinstance(nodo, dict):
+            if "$ref" in nodo:
+                return resolver(definiciones[nodo["$ref"].rsplit("/", 1)[-1]])
+            return {clave: resolver(valor) for clave, valor in nodo.items() if clave != "$defs"}
+        if isinstance(nodo, list):
+            return [resolver(item) for item in nodo]
+        return nodo
+
+    return resolver(esquema)
+
+
+FORMATO_DE_RECOMENDACION = {
+    "type": "text",
+    "mime_type": "application/json",
+    "schema": _sin_referencias(Recomendacion.model_json_schema()),
+}
+
+
 async def recomendar_con_preferencias(
     genero: str, extension: str, animo: str, libros: list[dict], descripcion_de_extension: str
-) -> str:
+) -> Recomendacion:
     """Última pieza del flujo guiado: arma el pedido y le pide al modelo que elija y explique.
 
     `libros` son los resultados de Open Library; cada uno con titulo, autor, anio, paginas y
     extension (corta, mediana o larga, calculada por el código a partir de las páginas).
-    El pedido es una sola llamada sin herramientas: el modelo solo puede elegir de la lista.
-    Si falla levanta ErrorDelModelo, igual que responder().
+    Devuelve una Recomendacion ya validada, solo con elegidos cuyo número existe en `libros`
+    (sin repetidos y hasta MAXIMO_DE_ELEGIDOS); el que arma el mensaje busca cada número en
+    su lista. Si falla, o si no queda ningún elegido válido, levanta ErrorDelModelo.
     """
     renglones = "\n".join(_renglon_de_libro(n, libro) for n, libro in enumerate(libros, start=1))
     pedido = (
@@ -197,16 +254,19 @@ async def recomendar_con_preferencias(
         f"Libros disponibles:\n{renglones}"
     )
     try:
+        # Sin tools: esta llamada puede usar response_format sin problema.
         interaccion = await asyncio.wait_for(
             cliente.aio.interactions.create(
                 model=GEMINI_MODELO,
                 system_instruction=PROMPT_DE_RECOMENDACION,
                 input=pedido,
                 store=False,  # la memoria es nuestra (SQLite), no de Google
+                response_format=FORMATO_DE_RECOMENDACION,
             ),
             timeout=SEGUNDOS_MAXIMOS_DEL_MODELO,
         )
-        return _texto_de(interaccion)
+        # Validamos del lado nuestro aunque el esquema ya viajó: no todo se aplica en el modelo.
+        recomendacion = Recomendacion.model_validate_json(interaccion.output_text)
     except asyncio.TimeoutError as error:
         logger.error(
             "Gemini no respondió en %d segundos (recomendación): se corta por tiempo",
@@ -216,3 +276,19 @@ async def recomendar_con_preferencias(
     except Exception as error:
         logger.error("Falló la recomendación con preferencias", exc_info=True)
         raise _como_error_del_modelo(error) from error
+
+    validos, vistos = [], set()
+    for eleccion in recomendacion.elegidos:
+        if not 1 <= eleccion.numero <= len(libros):
+            logger.warning(
+                "La recomendación trae un número fuera de rango (%d de %d): se descarta",
+                eleccion.numero, len(libros),
+            )
+        elif eleccion.numero not in vistos:
+            vistos.add(eleccion.numero)
+            validos.append(eleccion)
+    if not validos:
+        logger.error("La recomendación no trae ningún libro válido de la lista")
+        raise ErrorDelModelo("El modelo no eligió ningún libro de la lista")
+    recomendacion.elegidos = validos[:MAXIMO_DE_ELEGIDOS]
+    return recomendacion

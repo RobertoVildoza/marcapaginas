@@ -13,6 +13,51 @@ from config import RUTA_DB
 # en un archivo local tarda microsegundos y no es una espera de red ni de terceros.
 
 
+# Los pasos posibles tienen que coincidir con los de flujo.py. candidatos es un texto JSON con
+# los libros que se le ofrecieron a la persona en el paso de confirmación (NULL antes).
+_CREAR_FLUJO = """
+    CREATE TABLE IF NOT EXISTS {nombre} (
+        chat_id     INTEGER PRIMARY KEY,
+        paso        TEXT NOT NULL
+                    CHECK (paso IN ('genero', 'extension', 'animo', 'confirmacion')),
+        genero      TEXT,
+        extension   TEXT,
+        animo       TEXT,
+        iniciado_en TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        candidatos  TEXT
+    )
+"""
+
+
+def _migrar_flujo_activo(conexion: sqlite3.Connection) -> None:
+    """Pone al día la tabla flujo_activo de una base creada antes del paso 'confirmacion'.
+
+    CREATE TABLE IF NOT EXISTS no toca una tabla que ya existe, y ALTER TABLE ADD COLUMN no
+    alcanza: el CHECK de la columna paso, que no admite 'confirmacion', está en la definición
+    de la tabla y SQLite no deja modificarlo. Así que, si la definición vieja no lo trae, se
+    crea la tabla nueva, se copian las filas (candidatos queda en NULL) y se reemplaza la
+    vieja, todo en una transacción. Si ya está al día, no hace nada.
+    """
+    fila = conexion.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'flujo_activo'"
+    ).fetchone()
+    if fila is None or ("confirmacion" in fila[0] and "candidatos" in fila[0]):
+        return
+    conexion.execute("BEGIN")
+    try:
+        conexion.execute(_CREAR_FLUJO.format(nombre="flujo_activo_nueva"))
+        conexion.execute(
+            "INSERT INTO flujo_activo_nueva (chat_id, paso, genero, extension, animo, iniciado_en) "
+            "SELECT chat_id, paso, genero, extension, animo, iniciado_en FROM flujo_activo"
+        )
+        conexion.execute("DROP TABLE flujo_activo")
+        conexion.execute("ALTER TABLE flujo_activo_nueva RENAME TO flujo_activo")
+        conexion.execute("COMMIT")
+    except Exception:
+        conexion.execute("ROLLBACK")
+        raise
+
+
 def _conectar() -> sqlite3.Connection:
     return sqlite3.connect(RUTA_DB)
 
@@ -50,20 +95,9 @@ def inicializar() -> None:
             """
         )
         # Estado del flujo guiado "¿qué leo ahora?": una fila por chat (PRIMARY KEY), así
-        # que empezar de nuevo reemplaza el flujo anterior en vez de apilarlo. Los pasos
-        # posibles tienen que coincidir con los de flujo.py.
-        conexion.execute(
-            """
-            CREATE TABLE IF NOT EXISTS flujo_activo (
-                chat_id     INTEGER PRIMARY KEY,
-                paso        TEXT NOT NULL CHECK (paso IN ('genero', 'extension', 'animo')),
-                genero      TEXT,
-                extension   TEXT,
-                animo       TEXT,
-                iniciado_en TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
+        # que empezar de nuevo reemplaza el flujo anterior en vez de apilarlo.
+        _migrar_flujo_activo(conexion)
+        conexion.execute(_CREAR_FLUJO.format(nombre="flujo_activo"))
         # Reseñas analizadas. Las dos listas de aspectos van como texto JSON (json.dumps):
         # es lo más simple que no se rompe si un aspecto lleva comas o saltos de línea.
         # El CHECK repite el rango del esquema de analisis.py: la base no acepta un puntaje de 9.
@@ -151,22 +185,23 @@ def iniciar_flujo(chat_id: int) -> None:
 def leer_flujo(chat_id: int, minutos_de_vigencia: int) -> dict | None:
     """Devuelve el flujo activo del chat, o None si no hay.
 
-    El diccionario trae paso, genero, extension, animo y "vencido" (True si pasaron más de
+    El diccionario trae paso, genero, extension, animo, candidatos (lista de libros ofrecidos o None) y "vencido" (True si pasaron más de
     `minutos_de_vigencia` desde que empezó). La comparación la hace SQLite, que guarda
     iniciado_en en UTC con el mismo formato que datetime('now').
     """
     with closing(_conectar()) as conexion:
         fila = conexion.execute(
-            "SELECT paso, genero, extension, animo, iniciado_en < datetime('now', ?) "
+            "SELECT paso, genero, extension, animo, iniciado_en < datetime('now', ?), candidatos "
             "FROM flujo_activo WHERE chat_id = ?",
             (f"-{minutos_de_vigencia} minutes", chat_id),
         ).fetchone()
     if fila is None:
         return None
-    paso, genero, extension, animo, vencido = fila
+    paso, genero, extension, animo, vencido, candidatos = fila
     return {
         "paso": paso, "genero": genero, "extension": extension, "animo": animo,
         "vencido": bool(vencido),
+        "candidatos": json.loads(candidatos) if candidatos else None,
     }
 
 
@@ -179,6 +214,15 @@ def guardar_dato_de_flujo(chat_id: int, campo: str, valor: str | None, paso: str
         conexion.execute(
             f"UPDATE flujo_activo SET {campo} = ?, paso = ? WHERE chat_id = ?",
             (valor, paso, chat_id),
+        )
+
+
+def pasar_a_confirmacion(chat_id: int, candidatos: list[dict]) -> None:
+    """Deja el flujo en el paso 'confirmacion' con los libros que se le ofrecieron a la persona."""
+    with closing(_conectar()) as conexion, conexion:
+        conexion.execute(
+            "UPDATE flujo_activo SET candidatos = ?, paso = 'confirmacion' WHERE chat_id = ?",
+            (json.dumps(candidatos, ensure_ascii=False), chat_id),
         )
 
 
