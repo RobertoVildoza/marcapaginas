@@ -3,6 +3,7 @@
 Todo es por chat_id, así que dos personas distintas no se mezclan.
 """
 
+import json
 import sqlite3
 from contextlib import closing
 
@@ -17,7 +18,7 @@ def _conectar() -> sqlite3.Connection:
 
 
 def inicializar() -> None:
-    """Crea la tabla de mensajes si todavía no existe."""
+    """Crea las tablas si todavía no existen."""
     with closing(_conectar()) as conexion, conexion:
         conexion.execute(
             """
@@ -62,6 +63,27 @@ def inicializar() -> None:
                 iniciado_en TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
+        )
+        # Reseñas analizadas. Las dos listas de aspectos van como texto JSON (json.dumps):
+        # es lo más simple que no se rompe si un aspecto lleva comas o saltos de línea.
+        # El CHECK repite el rango del esquema de analisis.py: la base no acepta un puntaje de 9.
+        conexion.execute(
+            """
+            CREATE TABLE IF NOT EXISTS resenas (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id             INTEGER NOT NULL,
+                sentimiento         TEXT NOT NULL,
+                puntaje             INTEGER NOT NULL CHECK (puntaje BETWEEN 1 AND 5),
+                aspectos_elogiados  TEXT NOT NULL,
+                aspectos_criticados TEXT NOT NULL,
+                sintesis            TEXT NOT NULL,
+                texto_resena        TEXT NOT NULL,
+                creado_en           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conexion.execute(
+            "CREATE INDEX IF NOT EXISTS idx_resenas_chat ON resenas (chat_id, id)"
         )
 
 
@@ -175,3 +197,50 @@ def borrar_flujos_vencidos(minutos_de_vigencia: int) -> int:
             (f"-{minutos_de_vigencia} minutes",),
         )
         return cursor.rowcount
+
+
+def guardar_resena(
+    chat_id: int,
+    sentimiento: str,
+    puntaje: int,
+    aspectos_elogiados: list[str],
+    aspectos_criticados: list[str],
+    sintesis: str,
+    texto_resena: str,
+) -> None:
+    """Guarda el análisis de una reseña (ya validado) junto con el texto original."""
+    with closing(_conectar()) as conexion, conexion:
+        conexion.execute(
+            "INSERT INTO resenas (chat_id, sentimiento, puntaje, aspectos_elogiados, "
+            "aspectos_criticados, sintesis, texto_resena) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                chat_id, sentimiento, puntaje,
+                json.dumps(aspectos_elogiados, ensure_ascii=False),
+                json.dumps(aspectos_criticados, ensure_ascii=False),
+                sintesis, texto_resena,
+            ),
+        )
+
+
+def leer_resenas(chat_id: int) -> list[dict]:
+    """Devuelve las reseñas analizadas del chat, de la más vieja a la más nueva.
+
+    Cada una es un diccionario con sentimiento, puntaje, aspectos_elogiados y
+    aspectos_criticados (listas), sintesis, texto_resena y creado_en. El promedio de puntaje
+    se calcula sobre esta lista.
+    """
+    with closing(_conectar()) as conexion:
+        filas = conexion.execute(
+            "SELECT sentimiento, puntaje, aspectos_elogiados, aspectos_criticados, "
+            "sintesis, texto_resena, creado_en FROM resenas WHERE chat_id = ? ORDER BY id",
+            (chat_id,),
+        ).fetchall()
+    return [
+        {
+            "sentimiento": sentimiento, "puntaje": puntaje,
+            "aspectos_elogiados": json.loads(elogiados),
+            "aspectos_criticados": json.loads(criticados),
+            "sintesis": sintesis, "texto_resena": texto, "creado_en": creado_en,
+        }
+        for sentimiento, puntaje, elogiados, criticados, sintesis, texto, creado_en in filas
+    ]

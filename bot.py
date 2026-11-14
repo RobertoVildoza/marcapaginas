@@ -103,6 +103,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/queleo - Te hago tres preguntas y te recomiendo qué leer\n"
         "/cancelar - Salgo de /queleo en cualquier momento\n"
         "/analizar - Analizo una reseña: /analizar seguido del texto\n"
+        "/resenas - Tus reseñas analizadas, con puntaje y promedio\n"
         "/olvidar - Borro lo que recuerdo de nuestra conversación\n\n"
         "También podés escribirme cualquier mensaje y charlamos sobre libros."
     )
@@ -144,6 +145,8 @@ async def resena(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(MENSAJE_DE_ERROR)
         return
 
+    analisis.guardar(chat_id, partes[1], resultado)
+
     elogiados = ", ".join(resultado["aspectos_elogiados"]) or "nada en particular"
     criticados = ", ".join(resultado["aspectos_criticados"]) or "nada en particular"
     await responder_largo(
@@ -151,7 +154,29 @@ async def resena(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Sentimiento: {resultado['sentimiento']}\n"
         f"Elogia: {elogiados}\n"
         f"Critica: {criticados}\n"
-        f"Síntesis: {resultado['sintesis']}",
+        f"Síntesis: {resultado['sintesis']}\n"
+        f"Puntaje: {resultado['puntaje']}/5",
+    )
+
+
+# Comando /resenas
+async def resenas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra las reseñas analizadas de este chat y el promedio de puntaje, leyendo la base."""
+    guardadas = memoria.leer_resenas(update.effective_chat.id)
+    if not guardadas:
+        await update.message.reply_text(
+            "Todavía no analizaste ninguna reseña. Probá con /analizar seguido del texto."
+        )
+        return
+    promedio = sum(r["puntaje"] for r in guardadas) / len(guardadas)
+    renglones = [
+        f"{n}. {r['puntaje']}/5 ({r['sentimiento']}) - {r['sintesis']}"
+        for n, r in enumerate(guardadas, start=1)
+    ]
+    await responder_largo(
+        update,
+        f"Tus reseñas analizadas ({len(guardadas)}):\n\n" + "\n".join(renglones)
+        + f"\n\nPuntaje promedio: {promedio:.1f}/5",
     )
 
 
@@ -262,6 +287,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", ayuda))
     app.add_handler(CommandHandler("lista", lista))
     app.add_handler(CommandHandler("analizar", resena))
+    app.add_handler(CommandHandler("resenas", resenas))
     app.add_handler(CommandHandler("queleo", que_leo))
     app.add_handler(CommandHandler("cancelar", cancelar))
     app.add_handler(CommandHandler("olvidar", olvidar))

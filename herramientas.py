@@ -234,8 +234,9 @@ DECLARACION_ANALIZAR_RESENA = {
         "saber qué dice. No la uses para dar tu propia opinión ni para buscar datos de un "
         "libro. Devuelve un objeto con 'estado' ('ok' o 'error'). Si es 'ok', trae "
         "'sentimiento' ('favorable', 'desfavorable' o 'mixta'), 'aspectos_elogiados' y "
-        "'aspectos_criticados' (listas de textos cortos) y 'sintesis' (una línea con el "
-        "veredicto). Si es 'error', trae 'mensaje' con lo que pasó, para que se lo expliques "
+        "'aspectos_criticados' (listas de textos cortos), 'sintesis' (una línea con el "
+        "veredicto) y 'puntaje' (satisfacción de quien escribió la reseña, de 1 a 5). El "
+        "análisis queda guardado para el usuario. Si es 'error', trae 'mensaje' con lo que pasó, para que se lo expliques "
         "al usuario."
     ),
     "parameters": {
@@ -251,31 +252,9 @@ DECLARACION_ANALIZAR_RESENA = {
 }
 
 
-async def analizar_resena(texto: str) -> dict:
-    """Analiza una reseña de un libro y devuelve su análisis estructurado.
-
-    Usala cuando el usuario pegue una reseña, una crítica o la opinión de alguien sobre un
-    libro y quiera saber qué dice. No la uses para dar tu propia opinión ni para buscar datos
-    de un libro.
-
-    Args:
-        texto: el texto completo de la reseña, tal como lo pegó el usuario.
-
-    Returns:
-        Un diccionario con "estado" ("ok" o "error"). Si es "ok", trae "sentimiento"
-        ("favorable", "desfavorable" o "mixta"), "aspectos_elogiados" y "aspectos_criticados"
-        (listas de textos cortos) y "sintesis" (una línea con el veredicto). Si es "error",
-        trae "mensaje" con lo que pasó, para que se lo expliques al usuario.
-    """
-    logger.info(
-        "Herramienta analizar_resena invocada (%d caracteres)", len(texto),
-        extra={"herramienta": "analizar_resena"},
-    )
-    return await analisis.analizar_resena(texto)
-
-
-# Las dos que siguen se definen dentro de construir_herramientas (necesitan el chat_id), pero
-# sus declaraciones no dependen de él, así que van acá, justo arriba. Ninguna lleva chat_id:
+# Las tres que siguen se definen dentro de construir_herramientas (necesitan el chat_id), pero
+# sus declaraciones no dependen de él, así que van acá, justo arriba (la de analizar_resena
+# está más arriba, junto a las otras). Ninguna lleva chat_id:
 # lo pone el código, no el modelo.
 DECLARACION_GUARDAR_EN_LISTA = {
     "type": "function",
@@ -329,6 +308,32 @@ def construir_herramientas(chat_id: int) -> tuple[list[dict], dict]:
     El chat_id NO es un parámetro de las herramientas: si lo completara el modelo, podría
     inventarlo y leer o escribir la lista de lectura de otra persona.
     """
+
+    async def analizar_resena(texto: str) -> dict:
+        """Analiza una reseña de un libro, devuelve su análisis estructurado y lo guarda.
+
+        Usala cuando el usuario pegue una reseña, una crítica o la opinión de alguien sobre un
+        libro y quiera saber qué dice. No la uses para dar tu propia opinión ni para buscar
+        datos de un libro.
+
+        Args:
+            texto: el texto completo de la reseña, tal como lo pegó el usuario.
+
+        Returns:
+            Un diccionario con "estado" ("ok" o "error"). Si es "ok", trae "sentimiento"
+            ("favorable", "desfavorable" o "mixta"), "aspectos_elogiados" y
+            "aspectos_criticados" (listas de textos cortos), "sintesis" (una línea con el
+            veredicto) y "puntaje" (de 1 a 5). Si es "error", trae "mensaje" con lo que pasó,
+            para que se lo expliques al usuario.
+        """
+        logger.info(
+            "Herramienta analizar_resena invocada (%d caracteres, chat %s)", len(texto), chat_id,
+            extra={"herramienta": "analizar_resena"},
+        )
+        resultado = await analisis.analizar_resena(texto)
+        if resultado["estado"] == "ok":
+            analisis.guardar(chat_id, texto, resultado)
+        return resultado
 
     async def guardar_en_lista(titulo: str, autor: str, anio: int) -> dict:
         """Guarda un libro en la lista de lectura del usuario.
