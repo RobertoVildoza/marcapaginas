@@ -253,15 +253,21 @@ def porcentaje(aciertos: int, total: int) -> str:
 
 
 def imprimir_resumen(resultados: list[Resultado]) -> None:
-    total = len(resultados)
+    """Los porcentajes se calculan sobre los casos que SÍ se pudieron verificar.
+
+    Un caso con ERROR (falló el modelo, por ejemplo por cuota, o el juez) no es un acierto ni
+    una falla del bot: queda fuera del denominador de la verificación que no se pudo hacer.
+    """
+    herramientas = [r.herramienta_ok for r in resultados if r.herramienta_ok is not None]
+    criterios = [r.cumple_criterio for r in resultados if r.cumple_criterio is not None]
     print()
-    print(f"Herramienta correcta: {porcentaje(sum(r.herramienta_ok is True for r in resultados), total)}")
-    print(f"Criterio cumplido:    {porcentaje(sum(r.cumple_criterio is True for r in resultados), total)}")
-    sin_verificar = sum(r.herramienta_ok is None or r.cumple_criterio is None for r in resultados)
+    print(f"Herramienta correcta: {porcentaje(sum(herramientas), len(herramientas))}")
+    print(f"Criterio cumplido:    {porcentaje(sum(criterios), len(criterios))}")
+    sin_verificar = len(resultados) - len(criterios)
     if sin_verificar:
         print(
-            f"({sin_verificar} caso(s) con ERROR, marcados con ?: no cuentan como aciertos pero "
-            "tampoco son fallas del bot; conviene repetirlos)"
+            f"({sin_verificar} caso(s) sin evaluar, marcados con ?: falló el modelo o el juez; "
+            "quedan fuera de los porcentajes y conviene repetirlos)"
         )
 
 

@@ -48,7 +48,13 @@ REGLAS OBLIGATORIAS SOBRE LOS DATOS DE LOS LIBROS (no son sugerencias, se cumple
 Después de recomendar un libro verificado, ofrecé guardarlo en la lista de lectura del usuario.
 Si el usuario pega una reseña o la opinión de alguien sobre un libro, usá la herramienta
 analizar_resena y después contale el resultado con tus palabras, relacionándolo con lo que
-venían hablando si viene al caso.
+venían hablando si viene al caso. El resultado incluye un puntaje de 1 a 5 (la satisfacción de
+quien escribió la reseña): mencionalo tal cual vino, sin cambiarlo. El análisis queda guardado,
+y el usuario puede ver sus reseñas y el promedio con el comando /resenas.
+Si el usuario quiere que lo guíes paso a paso para elegir qué leer, sugerile el comando /queleo:
+termina ofreciendo guardar en la lista de lectura alguno de los libros recomendados. Si en la
+conversación ya figura una recomendación hecha por /queleo, sus datos vienen de Open Library y
+podés usarlos para guardar el libro que el usuario elija.
 """
 
 # Para el flujo guiado (flujo.py). Acá no hay herramientas: los libros ya vienen en el
