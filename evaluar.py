@@ -28,7 +28,9 @@ import asyncio
 import csv
 import json
 import logging
+import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -37,15 +39,25 @@ from pydantic import BaseModel, Field
 
 import gemini
 import memoria
-from config import GEMINI_MODELO, GEMINI_MODELO_ANALISIS, SEGUNDOS_MAXIMOS_DEL_MODELO, cliente
+from config import (
+    GEMINI_MODELO, GEMINI_MODELO_ANALISIS, RUTA_DB, SEGUNDOS_MAXIMOS_DEL_MODELO, cliente,
+)
 
 ID_CHAT_PRUEBA = 999999999  # un chat que no existe en Telegram, solo para las pruebas
 RAIZ = Path(__file__).parent
 ARCHIVO_DE_CASOS = RAIZ / "casos_prueba.json"
 CARPETA_RESULTADOS = RAIZ / "docs" / "evaluacion"
 
-# Segundos de espera entre un caso y el siguiente, para no pasarse de la cuota por minuto.
-PAUSA_ENTRE_CASOS = 8
+# Pausas para no pasarse de la cuota por minuto. Cada caso dispara dos o tres pedidos seguidos
+# (la conversación, con sus vueltas de herramientas, y el juez): la ráfaga es lo que pega contra
+# el límite. Si igual se pasa, el SDK reintenta el 429 con backoff por dentro y nuestro
+# asyncio.wait_for (SEGUNDOS_MAXIMOS_DEL_MODELO) lo corta antes de que termine: llega como
+# TimeoutError, no como 429. Por eso se evita llegar al límite en vez de atrapar el error.
+PAUSA_ENTRE_CASOS = 20
+PAUSA_ANTES_DEL_JUEZ = 3
+
+# Tablas de memoria.py que guardan estado por chat_id.
+TABLAS_CON_ESTADO = ["mensajes", "lista_lectura", "flujo_activo", "resenas"]
 
 logger = logging.getLogger("marcapaginas.evaluar")
 
@@ -148,6 +160,19 @@ def cargar_casos() -> list[Caso]:
 
 # --- Ejecución -----------------------------------------------------------------------------
 
+def limpiar_estado_de_prueba() -> None:
+    """Borra el estado que dejaron corridas anteriores en el chat de la evaluación.
+
+    evaluacion.db no se reinicia: sin esto, "guardar" pasa la primera vez y falla las
+    siguientes porque Dune ya estaba en la lista. El chat_id es fijo a propósito, para que los
+    reportes de distintas corridas sean comparables.
+    """
+    with closing(sqlite3.connect(RUTA_DB)) as conexion, conexion:
+        for tabla in TABLAS_CON_ESTADO:  # los nombres salen de la lista de arriba, no de afuera
+            cursor = conexion.execute(f"DELETE FROM {tabla} WHERE chat_id = ?", (ID_CHAT_PRUEBA,))
+            logger.info("Estado de prueba: %d fila(s) borradas de %s", cursor.rowcount, tabla)
+
+
 @dataclass
 class Resultado:
     caso: Caso
@@ -181,13 +206,15 @@ async def correr_caso(caso: Caso) -> Resultado:
         logger_herramientas.removeHandler(registro)
 
     herramienta_ok = herramienta_correcta(caso.herramienta_esperada, registro.invocadas)
+    await asyncio.sleep(PAUSA_ANTES_DEL_JUEZ)
     try:
         juicio = await juzgar(caso.pregunta, respuesta, caso.criterio)
     except Exception as error:
         logger.error("Falló el juez en el caso %s", caso.nombre, exc_info=True)
         return Resultado(
             caso, registro.invocadas, respuesta, herramienta_ok, None,
-            f"El juez no pudo evaluar: {error}",
+            # str() de un TimeoutError es vacío: con el nombre del tipo se ve qué pasó.
+            f"El juez no pudo evaluar: {type(error).__name__} {error}".rstrip(),
         )
     return Resultado(
         caso, registro.invocadas, respuesta, herramienta_ok, juicio.cumple, juicio.justificacion
@@ -280,6 +307,7 @@ async def main() -> None:
     casos = [por_nombre[n] for n in nombres_pedidos] or todos
 
     memoria.inicializar()
+    limpiar_estado_de_prueba()
     print(f"Modelo: {GEMINI_MODELO} | juez: {GEMINI_MODELO_ANALISIS} | casos: {len(casos)}")
     resultados = []
     for numero, caso in enumerate(casos, start=1):
@@ -300,4 +328,5 @@ if __name__ == "__main__":
     # Solo queremos leer los logs de herramientas, no verlos en la consola.
     logging.getLogger("marcapaginas.herramientas").setLevel(logging.INFO)
     logging.getLogger("marcapaginas.herramientas").propagate = False
+    logging.getLogger("marcapaginas.evaluar").setLevel(logging.INFO)
     asyncio.run(main())
